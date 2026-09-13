@@ -52,9 +52,7 @@ def _strip_leaked_pythonpath_from_sys_path() -> None:
     sys.path[:] = [
         p
         for p in sys.path
-        if not p
-        or _norm(p) not in leaked_entries
-        or _belongs_to_this_environment(p)
+        if not p or _norm(p) not in leaked_entries or _belongs_to_this_environment(p)
     ]
 
 
