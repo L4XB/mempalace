@@ -29,8 +29,33 @@ def _strip_leaked_pythonpath_from_sys_path() -> None:
     def _norm(path: str) -> str:
         return os.path.normcase(os.path.normpath(path))
 
+    def _belongs_to_this_environment(path: str) -> bool:
+        # An entry inside the running interpreter's own prefix is redundant,
+        # not foreign: the interpreter imports from there anyway, so removing
+        # it buys nothing and can take away the only directory where
+        # mempalace and its compiled dependencies live. That is what breaks an
+        # embedding host which launches this very venv with PYTHONPATH set to
+        # its own site-packages -- Electron backends, IDE language servers and
+        # `python -m` wrappers all do it -- leaving `import mempalace` working
+        # and every dependency import after it failing (#2484).
+        #
+        # The wrong-ABI protection is unchanged: a foreign venv's
+        # site-packages lies outside this prefix and is still stripped.
+        try:
+            resolved = _norm(os.path.realpath(path))
+            prefix = _norm(os.path.realpath(sys.prefix))
+        except OSError:
+            return False
+        return resolved == prefix or resolved.startswith(prefix + os.sep)
+
     leaked_entries = {_norm(p) for p in leaked.split(os.pathsep) if p}
-    sys.path[:] = [p for p in sys.path if not p or _norm(p) not in leaked_entries]
+    sys.path[:] = [
+        p
+        for p in sys.path
+        if not p
+        or _norm(p) not in leaked_entries
+        or _belongs_to_this_environment(p)
+    ]
 
 
 _strip_leaked_pythonpath_from_sys_path()

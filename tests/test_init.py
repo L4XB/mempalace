@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 
 import pytest
@@ -113,3 +114,40 @@ def test_init_preserves_cwd_marker_when_pythonpath_collides():
     assert result.returncode == 0, f"subprocess failed: {diag}"
     assert "CWD_IN_PATH: True" in result.stdout, f"cwd marker dropped: {diag}"
     assert "DOT_IN_PATH: False" in result.stdout, f"dot leak survived: {diag}"
+
+
+def test_init_keeps_the_running_environments_own_site_packages():
+    """A PYTHONPATH entry naming THIS interpreter's own site-packages is
+    redundant, not foreign, and must survive.
+
+    Embedding hosts routinely launch a venv with PYTHONPATH pointing at that
+    same venv's site-packages -- Electron backends, IDE language servers,
+    ``python -m`` wrappers. Stripping it leaves ``import mempalace`` working
+    (it resolved before the guard ran) and every dependency import after it
+    failing with a ModuleNotFoundError raised from inside mempalace while the
+    same import from the same interpreter succeeds (#2484).
+
+    The foreign sentinel in the same PYTHONPATH is the control: the wrong-ABI
+    protection must still strip it.
+    """
+    own_site = sysconfig.get_paths()["purelib"]
+    env = os.environ.copy()
+    env["PYTHONPATH"] = own_site + os.pathsep + f"{_LEAK_PREFIX}/foreign"
+    code = (
+        "import mempalace, os, sys; "
+        f"own = {own_site!r}; prefix = {_LEAK_PREFIX!r}; "
+        "norm = lambda p: os.path.normcase(os.path.normpath(os.path.realpath(p))); "
+        "print('OWN_PRESENT:', any(norm(p) == norm(own) for p in sys.path if p)); "
+        "print('FOREIGN_PRESENT:', any(prefix in (p or '') for p in sys.path))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        cwd=tempfile.gettempdir(),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OWN_PRESENT: True" in result.stdout, result.stdout
+    assert "FOREIGN_PRESENT: False" in result.stdout, result.stdout
