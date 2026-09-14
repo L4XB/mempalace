@@ -26,15 +26,11 @@ def test_the_watchdog_exit_runs_registered_cleanup_before_exiting(monkeypatch):
     order: list[str] = []
 
     monkeypatch.setattr(os, "_exit", lambda code: order.append(f"exit:{code}"))
-    monkeypatch.setattr(
-        atexit, "_run_exitfuncs", lambda: order.append("cleanup")
-    )
+    monkeypatch.setattr(atexit, "_run_exitfuncs", lambda: order.append("cleanup"))
 
     mcp._exit_running_registered_cleanup()
 
-    assert order == ["cleanup", "exit:0"], (
-        "the cleanup must run, and it must run BEFORE the exit"
-    )
+    assert order == ["cleanup", "exit:0"], "the cleanup must run, and it must run BEFORE the exit"
 
 
 def test_a_raising_cleanup_handler_does_not_keep_the_process_alive(monkeypatch):
@@ -110,9 +106,7 @@ def test_the_watchdog_calls_the_helper_rather_than_os_exit_directly(monkeypatch)
 
         return _raise
 
-    monkeypatch.setattr(
-        mcp, "_exit_running_registered_cleanup", _stop(called)
-    )
+    monkeypatch.setattr(mcp, "_exit_running_registered_cleanup", _stop(called))
     # `os._exit` too, so a tree where the watchdog still calls it directly
     # FAILS this cell instead of killing the run.
     monkeypatch.setattr(os, "_exit", _stop(raw_exit))
@@ -121,10 +115,6 @@ def test_the_watchdog_calls_the_helper_rather_than_os_exit_directly(monkeypatch)
 
     mcp._start_idle_exit_watchdog()
 
-    assert called.wait(10) or raw_exit.wait(0), (
-        "the idle watchdog never reached any exit path"
-    )
-    assert not raw_exit.is_set(), (
-        "the watchdog exited without running the registered cleanup"
-    )
+    assert called.wait(10) or raw_exit.wait(0), "the idle watchdog never reached any exit path"
+    assert not raw_exit.is_set(), "the watchdog exited without running the registered cleanup"
     assert called.is_set()
