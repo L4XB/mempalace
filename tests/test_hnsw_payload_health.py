@@ -389,3 +389,114 @@ def test_the_watermark_connection_is_closed(tmp_path, monkeypatch):
 
     assert chroma._clear_segment_watermark(str(db_path), seg_id) is True
     assert closed == [True], "the connection outlived the call"
+
+
+# --- quarantine must say when the WAL cannot replay what it renamed (#2510) ---
+
+
+def _palace_with_purged_queue(tmp_path, *, total=8, purge_below=5):
+    """A real chromadb palace whose embeddings_queue has been purged, as 1.5.x does."""
+    import sqlite3
+
+    import chromadb
+
+    palace = tmp_path / "palace"
+    client = chromadb.PersistentClient(path=str(palace))
+    collection = client.get_or_create_collection("mempalace_drawers")
+    collection.add(
+        ids=[f"id{i}" for i in range(total)],
+        embeddings=[[float(i), 0.0, 1.0] for i in range(total)],
+        documents=[f"doc {i}" for i in range(total)],
+    )
+    del collection, client
+
+    db_path = palace / "chroma.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        if purge_below is not None:
+            conn.execute("DELETE FROM embeddings_queue WHERE seq_id < ?", (purge_below,))
+        segment_id = conn.execute(
+            "SELECT id FROM segments WHERE type LIKE '%hnsw%' OR scope = 'VECTOR' LIMIT 1"
+        ).fetchone()[0]
+    return palace, str(db_path), segment_id
+
+
+def test_a_purged_queue_reports_what_it_cannot_replay(tmp_path):
+    """The rebuild replays from the queue, and chromadb purges it.
+
+    Everything written below the purge watermark is absent from the rebuilt
+    index while its metadata row survives, which is why the count and an
+    unfiltered search both keep looking healthy.
+    """
+    from mempalace.backends.chroma import _wal_unreplayable_count
+
+    _, db_path, segment_id = _palace_with_purged_queue(tmp_path, total=8, purge_below=5)
+
+    assert _wal_unreplayable_count(db_path, segment_id) == 4
+
+
+def test_an_intact_queue_reports_nothing_lost(tmp_path):
+    from mempalace.backends.chroma import _wal_unreplayable_count
+
+    _, db_path, segment_id = _palace_with_purged_queue(tmp_path, total=8, purge_below=None)
+
+    assert _wal_unreplayable_count(db_path, segment_id) == 0
+
+
+def test_an_unmeasurable_palace_reports_none_not_zero(tmp_path):
+    """A failure must not read as "nothing was lost"."""
+    from mempalace.backends.chroma import _wal_unreplayable_count
+
+    db_path = tmp_path / "chroma.sqlite3"
+    db_path.write_text("sqlite placeholder")
+
+    assert _wal_unreplayable_count(str(db_path), "11111111-2222-3333-4444-555555555555") is None
+
+
+def test_quarantine_reports_the_unreplayable_remainder(tmp_path, caplog):
+    """The wiring, not just the measurement: the rename must say what it costs."""
+    import logging
+
+    palace, db_path, segment_id = _palace_with_purged_queue(tmp_path, total=8, purge_below=5)
+    seg_dir = palace / segment_id
+    _write_segment(
+        seg_dir,
+        data_size=100,
+        link_size=int(100 * (_HNSW_LINK_TO_DATA_MAX_RATIO + 1)),
+    )
+    same_time = 1_700_000_000
+    os.utime(db_path, (same_time, same_time))
+    os.utime(seg_dir / "data_level0.bin", (same_time, same_time))
+
+    with caplog.at_level(logging.ERROR, logger="mempalace.backends.chroma"):
+        moved = quarantine_stale_hnsw(str(palace), stale_seconds=999_999)
+
+    assert len(moved) == 1
+    assert any(
+        "can no longer replay" in record.getMessage() and "4 embedding" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+def test_blob_seq_ids_are_not_counted_as_unreplayable(tmp_path):
+    """0.6.x wrote seq_id as a BLOB, and SQLite orders every blob after every integer.
+
+    Counting those rows would report an intact queue as a total loss.
+    """
+    import sqlite3
+
+    from mempalace.backends.chroma import _wal_unreplayable_count
+
+    _, db_path, segment_id = _palace_with_purged_queue(tmp_path, total=8, purge_below=None)
+    assert _wal_unreplayable_count(db_path, segment_id) == 0
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT segment_id, embedding_id, created_at FROM embeddings LIMIT 1"
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO embeddings (segment_id, embedding_id, seq_id, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (row[0], "legacy-blob-row", (12345).to_bytes(8, "big"), row[2]),
+        )
+
+    assert _wal_unreplayable_count(db_path, segment_id) == 0
