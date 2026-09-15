@@ -395,10 +395,23 @@ def test_the_watermark_connection_is_closed(tmp_path, monkeypatch):
 
 
 def _palace_with_purged_queue(tmp_path, *, total=8, purge_below=5):
-    """A real chromadb palace whose embeddings_queue has been purged, as 1.5.x does."""
+    """A real chromadb palace whose embeddings_queue has been purged, as 1.5.x does.
+
+    Every handle is released before returning. ``del client`` is enough on
+    POSIX, where an open file does not stop its directory from being renamed,
+    but not on Windows: a caller that quarantines the segment directory gets
+    ``PermissionError: [WinError 5]`` from ``os.rename`` and measures the
+    failure path instead of the code under test. Use the same close sequence
+    the repair path uses, and close the sqlite connection too, since
+    ``with sqlite3.connect(...)`` commits but does not close.
+    """
+    import gc
     import sqlite3
+    from contextlib import closing
 
     import chromadb
+
+    from mempalace.backends.chroma import _clear_chroma_system_cache, _close_client
 
     palace = tmp_path / "palace"
     client = chromadb.PersistentClient(path=str(palace))
@@ -408,12 +421,17 @@ def _palace_with_purged_queue(tmp_path, *, total=8, purge_below=5):
         embeddings=[[float(i), 0.0, 1.0] for i in range(total)],
         documents=[f"doc {i}" for i in range(total)],
     )
-    del collection, client
+    del collection
+    _close_client(client)
+    del client
+    _clear_chroma_system_cache()
+    gc.collect()
 
     db_path = palace / "chroma.sqlite3"
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         if purge_below is not None:
             conn.execute("DELETE FROM embeddings_queue WHERE seq_id < ?", (purge_below,))
+            conn.commit()
         segment_id = conn.execute(
             "SELECT id FROM segments WHERE type LIKE '%hnsw%' OR scope = 'VECTOR' LIMIT 1"
         ).fetchone()[0]
@@ -470,7 +488,7 @@ def test_quarantine_reports_the_unreplayable_remainder(tmp_path, caplog):
     with caplog.at_level(logging.ERROR, logger="mempalace.backends.chroma"):
         moved = quarantine_stale_hnsw(str(palace), stale_seconds=999_999)
 
-    assert len(moved) == 1
+    assert len(moved) == 1, [record.getMessage() for record in caplog.records]
     assert any(
         "can no longer replay" in record.getMessage() and "4 embedding" in record.getMessage()
         for record in caplog.records
