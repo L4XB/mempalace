@@ -737,11 +737,17 @@ def _clear_segment_watermark(db_path: str, segment_id: str) -> bool:
     watermark of a segment that is still live would make Chroma replay the
     whole queue into an index that already holds it.
     """
+    # `contextlib.closing`, not a bare `with`: the connection context manager
+    # commits, it does not close. Quarantine runs before `PersistentClient`
+    # opens the palace, and an open Python sqlite3 connection against a
+    # ChromaDB 1.5.x WAL-mode database leaves state that segfaults that call
+    # (see `_fix_blob_seq_ids`, which takes the same precaution).
     try:
-        with sqlite3.connect(db_path) as conn:
+        with contextlib.closing(sqlite3.connect(db_path)) as conn:
             deleted = conn.execute(
                 "DELETE FROM max_seq_id WHERE segment_id = ?", (segment_id,)
             ).rowcount
+            conn.commit()
     except sqlite3.Error:
         logger.exception(
             "Quarantined segment %s but could not clear its max_seq_id row; "

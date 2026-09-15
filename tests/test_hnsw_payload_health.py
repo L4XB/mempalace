@@ -350,3 +350,42 @@ def test_quarantine_survives_a_palace_whose_sqlite_is_unreadable(tmp_path):
     db_path.write_text("sqlite placeholder")
 
     assert _clear_segment_watermark(str(db_path), "11111111-2222-3333-4444-555555555555") is False
+
+
+def test_the_watermark_connection_is_closed(tmp_path, monkeypatch):
+    """Quarantine runs before `PersistentClient` opens the palace.
+
+    An open Python sqlite3 connection against a ChromaDB 1.5.x WAL-mode
+    database leaves state that segfaults that call, which is why
+    `_fix_blob_seq_ids` and the collection-type migration both close theirs
+    explicitly. A bare `with sqlite3.connect(...)` commits but does not close.
+    """
+    import sqlite3
+
+    from mempalace.backends import chroma
+
+    seg_id = "11111111-2222-3333-4444-555555555555"
+    _, db_path = _palace_with_watermark(tmp_path, seg_id)
+    closed: list[bool] = []
+    real_connect = sqlite3.connect
+
+    class TrackingConnection:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, *args, **kwargs):
+            return self._inner.execute(*args, **kwargs)
+
+        def commit(self):
+            return self._inner.commit()
+
+        def close(self):
+            closed.append(True)
+            return self._inner.close()
+
+    monkeypatch.setattr(
+        chroma.sqlite3, "connect", lambda *a, **kw: TrackingConnection(real_connect(*a, **kw))
+    )
+
+    assert chroma._clear_segment_watermark(str(db_path), seg_id) is True
+    assert closed == [True], "the connection outlived the call"
