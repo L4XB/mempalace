@@ -1455,3 +1455,60 @@ def test_hnsw_indexed_ids_separates_never_flushed_from_unreadable(tmp_path):
         f.write(b"not a pickle")
     assert _hnsw_indexed_ids(str(tmp_path), seg) is None
 
+
+def test_repair_status_tells_an_unflushed_palace_from_one_that_lost_its_index(tmp_path, capsys):
+    """Both report status UNKNOWN; repair-status must still separate them.
+
+    Reading `status` alone cannot: it is load-bearing for MCP's global vector
+    gating, so it deliberately stays "unknown" on an inconclusive capacity
+    probe. The coverage line and the `searchable` dict are what tell the
+    operator, and a health check, which of the two palaces needs repair.
+    """
+    from mempalace.repair import status as repair_status
+
+    healthy = tmp_path / "healthy"
+    healthy.mkdir()
+    _seed_chroma_db(str(healthy), sqlite_count=50, segment_id="seg-h", sync_threshold=1_000)
+    _seed_embeddings_queue(str(healthy), [f"d-{i}" for i in range(50)])
+
+    damaged = tmp_path / "damaged"
+    damaged.mkdir()
+    _seed_chroma_db(str(damaged), sqlite_count=50, segment_id="seg-d", sync_threshold=1_000)
+    _seed_embeddings_queue(str(damaged), [f"d-{i}" for i in range(6)])
+
+    healthy_result = repair_status(palace_path=str(healthy))
+    healthy_out = capsys.readouterr().out
+    damaged_result = repair_status(palace_path=str(damaged))
+    damaged_out = capsys.readouterr().out
+
+    assert healthy_result["drawers"]["status"] == "unknown"
+    assert damaged_result["drawers"]["status"] == "unknown"
+
+    assert healthy_result["drawers"]["searchable"]["degraded"] is False
+    assert "50 / 50 drawers (100.0%)" in healthy_out
+    assert "mempalace repair --mode from-sqlite" not in healthy_out
+
+    assert damaged_result["drawers"]["searchable"]["degraded"] is True
+    assert damaged_result["drawers"]["searchable"]["unsearchable_count"] == 44
+    assert "6 / 50 drawers (12.0%)" in damaged_out
+    assert "mempalace repair --mode from-sqlite --archive-existing" in damaged_out
+
+
+def test_repair_status_prints_flush_unreachable_as_its_own_line(tmp_path, capsys):
+    """A collection that can never reach its own flush threshold is benign.
+
+    It is also indistinguishable from a fault if it only ever appears as
+    prose in ``note:``, so it gets a line and a dict key of its own (#2514).
+    """
+    from mempalace.repair import status as repair_status
+
+    _seed_chroma_db(str(tmp_path), sqlite_count=2_500, segment_id="seg-fu", sync_threshold=50_000)
+    _seed_embeddings_queue(str(tmp_path), [f"d-{i}" for i in range(2_500)])
+
+    result = repair_status(palace_path=str(tmp_path))
+    captured = capsys.readouterr().out
+
+    assert result["drawers"]["flush_unreachable"] is True
+    assert "flush:          unreachable at this collection size" in captured
+    assert "2,500 / 2,500 drawers (100.0%)" in captured
+    assert "mempalace repair --mode from-sqlite" not in captured
