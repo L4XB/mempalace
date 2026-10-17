@@ -4,7 +4,7 @@ query_sanitizer.py — Mitigate system prompt contamination in search queries.
 Problem: AI agents sometimes prepend system prompts (2000+ chars) to search queries.
 Embedding models represent the concatenated string as a single vector where the
 system prompt overwhelms the actual question (typically 10-50 chars), causing
-near-total retrieval failure (89.8% → 1.0% R@10). See Issue #333.
+near-total retrieval failure (89.8% → 1.0% R@10).
 
 Approach: "Mitigation" (減災) — not perfect prevention, but prevents the cliff.
 
@@ -101,7 +101,7 @@ def sanitize_query(raw_query: str) -> dict:
         return _sanitized(raw_query or "", "passthrough", len(raw_query or ""), False)
 
     # Replace lone surrogates before any further processing so downstream
-    # embed calls don't crash on UTF-8 encode (#1235).
+    # embed calls don't crash on UTF-8 encode.
     original_length = len(raw_query)
     stripped = raw_query.strip()
     raw_query = strip_lone_surrogates(stripped)

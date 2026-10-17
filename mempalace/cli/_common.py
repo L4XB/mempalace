@@ -140,8 +140,8 @@ def _run_pass_zero(project_dir, palace_dir, llm_provider) -> dict:
     # MERGE-FIELDS, NOT REPLACE: Tier 2's persona/user/platform extraction
     # is the whole reason to run it, but a weak local model (e.g. Ollama
     # gemma4:e4b) can return a wrong likely_ai_dialogue/confidence call
-    # that overrides a confident heuristic answer. Per @igorls's review of
-    # PR #1211: keep the heuristic's likely_ai_dialogue + confidence
+    # that overrides a confident heuristic answer. So keep the heuristic's
+    # likely_ai_dialogue + confidence
     # (don't let a weak LLM flip a confident regex answer), and merge in
     # LLM's persona-related fields + combined evidence.
     if llm_provider is not None:
@@ -208,7 +208,7 @@ def _ensure_mempalace_files_gitignored(project_dir) -> bool:
     """If project_dir is a git repo, ensure MemPalace's per-project files
     are listed in .gitignore so they don't get committed by accident.
 
-    Returns True if .gitignore was updated, False otherwise. Issue #185:
+    Returns True if .gitignore was updated, False otherwise.
     `mempalace init` writes mempalace.yaml + entities.json into the
     project root, where they previously had no protection against being
     staged into git.
@@ -258,7 +258,7 @@ def _exit_on_misspelled_embedding_model():
     from ..embedding import UnknownEmbeddingModelError
 
     try:
-        MempalaceConfig().embedding_model
+        _ = MempalaceConfig().embedding_model  # reading it validates the name
     except UnknownEmbeddingModelError as exc:
         print(f"mempalace: {exc}", file=sys.stderr)
         sys.exit(1)

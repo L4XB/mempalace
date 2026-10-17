@@ -398,16 +398,6 @@ def read_watch_state(path: str) -> tuple:
     return None, WATCH_STATE_CORRUPT
 
 
-def read_watch_cursor(path: str) -> Optional[str]:
-    """The cursor from a watch state file, or ``None``.
-
-    Convenience wrapper over :func:`read_watch_state` for callers that do not
-    need to tell a first run from a corrupt file. Watchers should prefer
-    ``read_watch_state``, because those two cases must not behave alike.
-    """
-    return read_watch_state(path)[0]
-
-
 def write_watch_cursor(path: str, cursor: str, agent: str = None, required: bool = False) -> None:
     """Persist a watch cursor atomically.
 

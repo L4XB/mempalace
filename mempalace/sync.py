@@ -1,5 +1,5 @@
 """
-sync.py — Gitignore-aware drawer prune (#1252).
+sync.py — Gitignore-aware drawer prune.
 
 Removes drawers whose source files are now gitignored, deleted, or moved
 out of the project. Reuses the same GitignoreMatcher infrastructure that
@@ -158,8 +158,7 @@ _SURVIVOR_PROBE_LIMIT: Final = 8
 # 32,763 raises ``too many SQL variables``. That ceiling is the backend's,
 # not the one the SQLite reachable from Python reports, which is 250,000.
 # ``closet_llm`` works around the same number from the other side,
-# paginating a fetch whose returned rows would bind past it (#802, #850,
-# #1073). 500 sits sixty-five times under it, which leaves room for the
+# paginating a fetch whose returned rows would bind past it. 500 sits sixty-five times under it, which leaves room for the
 # matching rows a survivor probe also asks the metadata of, since those bind
 # a variable each as well; a batch the backend still refuses is halved rather
 # than assumed to fit.

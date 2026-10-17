@@ -572,7 +572,7 @@ TOOLS = {
         "handler": tool_mine,
     },
     "mempalace_delete_by_source": {
-        "description": "Bulk-delete every drawer mined from one source_file (exact match). Use to clean up benchmark/test data accidentally mined into a user wing (#1722). Returns a dry-run match count and sample by default; pass dry_run=false to commit. Irreversible; a commit also removes those drawers' earlier revisions.",
+        "description": "Bulk-delete every drawer mined from one source_file (exact match). Use to clean up benchmark/test data accidentally mined into a user wing. Returns a dry-run match count and sample by default; pass dry_run=false to commit. Irreversible; a commit also removes those drawers' earlier revisions.",
         "input_schema": {
             "type": "object",
             "properties": {

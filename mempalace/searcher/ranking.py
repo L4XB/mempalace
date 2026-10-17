@@ -22,7 +22,7 @@ def _result_drawer_id(meta, stored_drawer_id):
     Chunk metadata carries the logical-group id under ``parent_drawer_id``
     (``tool_add_drawer``) or ``parent_entry_id`` (``tool_diary_write``);
     resolving both means a hit on a chunked diary entry reports the id that
-    fetches the WHOLE entry rather than the one chunk that matched (#2185).
+    fetches the WHOLE entry rather than the one chunk that matched.
     Kept in sync with ``mcp_server._PARENT_ID_KEYS``.
     """
     meta = meta or {}
@@ -102,7 +102,7 @@ def _resolve_stop_words(lang: Optional[str]) -> frozenset:
 
 
 def _resolve_hybrid_rank_weights() -> tuple:
-    """Resolve the vector/BM25 weights for the hybrid re-rank (#2298).
+    """Resolve the vector/BM25 weights for the hybrid re-rank.
 
     Reads ``MempalaceConfig().hybrid_rank_vector_weight`` /
     ``.hybrid_rank_bm25_weight`` — which themselves resolve env var

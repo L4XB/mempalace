@@ -13,14 +13,14 @@ Three embedding-model options are available, selected via
 * ``embeddinggemma`` — ``onnx-community/embeddinggemma-300m-ONNX`` (q8), 384-dim
   via Matryoshka truncation, multilingual (100+ languages). Cross-lingual cos
   ~0.88 on parallel translations vs MiniLM's ~0.35. Recommended for any
-  non-English use; onboarding offers it as the default. The ~300 MB ONNX
+  non-English use (``mempalace init --embedding-model embeddinggemma``). The ~300 MB ONNX
   model is lazy-downloaded from HuggingFace on first use. Switching models
   on an existing palace requires ``mempalace repair rebuild-index``
   (different vector space). Its ``session.run()`` sub-batch size (32 docs by
-  default, #1770) is overridable via ``MEMPALACE_EMBEDDINGGEMMA_BATCH_SIZE``
+  default) is overridable via ``MEMPALACE_EMBEDDINGGEMMA_BATCH_SIZE``
   or ``embeddinggemma_batch_size`` in ``config.json`` for palaces whose
   drawers are long enough that the default sub-batch exceeds available
-  memory (#2330).
+  memory.
 * ``openai-compat`` — embeddings served by any OpenAI-compatible
   ``/v1/embeddings`` endpoint (LM Studio, llama.cpp, vLLM, Ollama's OpenAI
   shim, or a self-hosted server) instead of a local ONNX model. Useful for
@@ -243,7 +243,7 @@ def _resolve_providers(device: str, model: Optional[str] = None) -> tuple[list, 
 
 
 def _intra_op_session_options(intra_op_num_threads: int):
-    """Build ORT ``SessionOptions`` capping the intra-op thread pool (#1068).
+    """Build ORT ``SessionOptions`` capping the intra-op thread pool.
 
     Returns ``None`` when ``intra_op_num_threads <= 0`` so the caller leaves
     ORT at its default (≈ physical core count). ChromaDB's embedder ignores
@@ -261,7 +261,7 @@ def _intra_op_session_options(intra_op_num_threads: int):
 
 
 def _resolve_intra_op_threads() -> int:
-    """Read the configured ORT intra-op thread cap (``0`` = uncapped, #1068)."""
+    """Read the configured ORT intra-op thread cap (``0`` = uncapped)."""
     try:
         from .config import MempalaceConfig
 
@@ -272,7 +272,7 @@ def _resolve_intra_op_threads() -> int:
 
 
 def _resolve_embeddinggemma_batch_size() -> int:
-    """Read the configured EmbeddingGemma sub-batch size (#2330)."""
+    """Read the configured EmbeddingGemma sub-batch size."""
     try:
         from .config import MempalaceConfig
 
@@ -323,7 +323,7 @@ def _build_ef_class():
         def model(self):
             # Upstream builds the InferenceSession with no intra-op thread cap,
             # so ORT defaults its pool to the physical core count and a
-            # background mine pins every core (#1068). Rebuild the session the
+            # background mine pins every core. Rebuild the session the
             # same way upstream does (same SessionOptions, same CoreML pruning,
             # same model path) but with our cap applied. If upstream's
             # internals shift, fall back to its uncapped build so embedding
@@ -366,12 +366,12 @@ _EMBEDDINGGEMMA_MAX_LEN = 2048
 # so one unchunked run over a repair-scale batch (5000 docs, repair.py/
 # cli.py) allocates attention buffers that grow with batch size and
 # superlinearly with padded length (score tensors are batch x heads x
-# len^2 per layer), and the kernel OOM-kills the process (#1770). 32
+# len^2 per layer), and the kernel OOM-kills the process. 32
 # matches the internal batch size of chromadb's ONNXMiniLM_L6_V2, whose
 # chunked _forward survives the same call sites. embeddinggemma's
 # sentence_embedding output is attention-masked, so sub-batch padding
 # does not change any row's vector. __call__ decides which documents share
-# a sub-batch by size rather than by arrival order (#2104), because the run
+# a sub-batch by size rather than by arrival order, because the run
 # is priced on that padded length and not on the document count.
 _EMBEDDINGGEMMA_BATCH_SIZE = 32
 # Short document embedded once per model load to prove the execution provider
@@ -386,7 +386,7 @@ def _embeddinggemma_gather_patch(model_path: str):
     on every ``run()`` and only then gathers the rows it needs, so each run,
     even for a two-word query, builds a 768 MiB float32 copy that the CPU
     arena keeps; a long-running server grew with every concurrent search
-    until it was OOM-killed (#2681). See :mod:`mempalace.onnx_graph`.
+    until it was OOM-killed. See :mod:`mempalace.onnx_graph`.
     ``None`` (load the file unchanged) when the graph has no such lookup or
     cannot be read.
     """
@@ -690,7 +690,7 @@ class EmbeddinggemmaONNX:
         long document drags a whole sub-batch up to its own length. Without
         grouping the bill is set by arrival order: a verbatim transcript
         whose long tool results sit between one-line replies pays the long
-        length for nearly every row (#2104).
+        length for nearly every row.
 
         An input that fits a single sub-batch is left in arrival order: every
         row pads to the same width either way, so the keys would buy nothing
@@ -726,7 +726,7 @@ class EmbeddinggemmaONNX:
         embeddings: list[list[float] | None] = [None] * len(input)
         # Tokenize and run per sub-batch, not over the whole input: the ONNX
         # runtime only ever holds batch_size rows of attention buffers at a
-        # time (#1770).
+        # time.
         for start in range(0, len(order), self._batch_size):
             idxs = order[start : start + self._batch_size]
             with _run_guard(self._providers, self._run_lock):
@@ -850,7 +850,7 @@ class OpenAICompatEmbeddingFunction:
         headers = {
             "Content-Type": "application/json",
             # Some hosted (Cloudflare-fronted) endpoints 403 the default
-            # ``Python-urllib`` User-Agent — send our own (see issue #1570).
+            # ``Python-urllib`` User-Agent — send our own.
             "User-Agent": f"mempalace/{__version__}",
         }
         if self._api_key:
@@ -1205,7 +1205,7 @@ def _near_miss_suggestions(name: str) -> tuple:
 def _normalize_stored_model_name(name) -> str:
     """The core model whose vectors a recorded ``model_name`` stands for.
 
-    Older builds (and develop before #2694) embedded any unrecognized
+    Older builds embedded any unrecognized
     ``embedding_model`` with MiniLM but recorded the raw name
     (``"all-minilm-l6-v2"``, ``"none"`` from a JSON null, ``"minilm-l6"``,
     even a typo such as ``"embedinggemma2"``). So a recorded name that is

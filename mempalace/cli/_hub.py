@@ -254,7 +254,7 @@ def _forward_mine_to_hub(args, palace_path: str, *, include_ignored=None) -> boo
     its whole lifetime, so a direct mine from this process — including the
     background save hooks, which spawn exactly this CLI — would be refused
     and transcript capture would silently stop on the hub machine. The hub
-    itself may mine (the palace lock is process-re-entrant there, #1859),
+    itself may mine (the palace lock is process-re-entrant there),
     so the fix is to hand it the job over HTTP.
 
     Returns True when the hub handled the mine (this function has already

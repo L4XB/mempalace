@@ -274,7 +274,7 @@ def _migrate_locked(palace_path: str, dry_run: bool = False, confirm: bool = Fal
     # migrate must rebuild from SQLite instead of returning "No migration needed."
     #
     # Preflight HNSW divergence before touching the collection at all: the
-    # #1222 SIGSEGV/panic class crashes on count() against a diverged
+    # SIGSEGV/panic class crashes on count() against a diverged
     # segment, and a native crash can't be caught by the except Exception
     # below -- a diverged palace must never reach col.count() in the first
     # place. The already-diverged case degrades to exactly the same
@@ -414,7 +414,7 @@ def _migrate_locked(palace_path: str, dry_run: bool = False, confirm: bool = Fal
 
 
 # ---------------------------------------------------------------------------
-# Wing-name normalization migration (#1675 follow-up)
+# Wing-name normalization migration
 # ---------------------------------------------------------------------------
 #
 # normalize_wing_name now strips leading/trailing separators, so a path-encoded
@@ -443,10 +443,10 @@ def _normalized_wing_target(wing):
     if not isinstance(wing, str) or not wing:
         return None
     # Apply the full normalization and explicitly strip leading/trailing
-    # separators. The strip is this migration's whole purpose (#1675); doing it
+    # separators. The strip is this migration's whole purpose; doing it
     # here rather than relying on normalize_wing_name keeps the migration correct
-    # even when run against a build whose normalize_wing_name predates #1675, and
-    # matches the post-#1675 derivation exactly.
+    # even when run against a build whose normalize_wing_name predates the separator strip, and
+    # matches the current derivation exactly.
     target = normalize_wing_name(wing).strip("_")
     if not target or target == wing:
         return None
@@ -556,7 +556,7 @@ def _apply_topics_by_wing_renames(renames):
 
 def migrate_wing_names(palace_path: str, dry_run: bool = False, confirm: bool = False) -> bool:
     """Normalize legacy wing names in ``palace_path`` (strip leading/trailing
-    separators), so palaces built before #1675 keep their memories discoverable.
+    separators), so palaces built before the separator strip keep their memories discoverable.
 
     Re-keys the ``wing`` metadata on drawers and closets in place (IDs untouched)
     and the ``topics_by_wing`` registry, merging collisions. Idempotent.

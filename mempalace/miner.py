@@ -57,7 +57,7 @@ from .palace import (
     write_file_drawers,
 )
 
-# Re-exported: callers and tests import these from the miner (#2676).
+# Re-exported: callers and tests import these from the miner.
 from .project_config import (  # noqa: F401
     MEMPALACE_PROJECT_FILES,
     PROJECT_CONFIG_FILENAMES,
@@ -161,7 +161,7 @@ READABLE_EXTENSIONS = {
     ".sln",
     ".razor",
     ".cshtml",
-    # Dynamics 365 Business Central (AL language) source, #278.
+    # Dynamics 365 Business Central (AL language) source.
     ".al",
     # PowerShell scripts, the Windows counterpart of ``.sh`` above.
     ".ps1",
@@ -188,11 +188,11 @@ from .config import (  # noqa: E402  (kept here for the legacy alias)
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
 # A safety rail against pathological generated artifacts (lockfiles not in
 # SKIP_FILENAMES, vendored data dumps, etc.). Originally 500 to bound ONNX
-# runtime `bad allocation` errors on Windows (#1296), but at CHUNK_SIZE=800
-# that capped legitimate long-form content (#1455: full-text scholarly
+# runtime `bad allocation` errors on Windows, but at CHUNK_SIZE=800
+# that capped legitimate long-form content (full-text scholarly
 # editions, novels) at ~400 KB. The new default leaves two orders of
 # magnitude of safety margin against the original lockfile case
-# (~1124 chunks for `pnpm-lock.yaml` per #1296) while not touching
+# (~1124 chunks for a large `pnpm-lock.yaml`) while not touching
 # hand-written prose. Per-ONNX-call exposure is bounded by
 # `DRAWER_UPSERT_BATCH_SIZE` (1000 chunks/batch) regardless of this cap,
 # so the cap is a per-file admission rail, not a per-batch limit. Lower
@@ -517,8 +517,7 @@ def load_config(project_dir: str) -> dict:
         # ``cmd_init`` and ``room_detector_local`` do — otherwise a
         # hyphenated project mined without a yaml file lands under a
         # raw-name wing while ``topics_by_wing`` was keyed under the
-        # normalized slug, silently dropping every topic tunnel
-        # (the no-yaml branch of issue #1194).
+        # normalized slug, silently dropping every topic tunnel.
         wing_name = normalize_wing_name(resolved_project_dir.name)
         print(
             f"  No mempalace.yaml found in {resolved_project_dir} "
@@ -629,7 +628,7 @@ def chunk_text(
 
     ``line_start`` / ``line_end`` are 1-indexed line numbers in the stripped
     source, giving an approximate locator for where the chunk came from.
-    Closet pointers (Tier 6a) use this to emit ``YYYY-MM-DD:L42-L78`` segments
+    Closet pointers use this to emit ``YYYY-MM-DD:L42-L78`` segments
     so retrieval can jump straight to the right span without opening the
     whole drawer.
 
@@ -647,7 +646,7 @@ def chunk_text(
     # values, but ``chunk_text`` is a public function — direct callers
     # (tests, library users, future caller paths) might still pass
     # values that would loop forever. Fail fast and loud rather than
-    # hang. See review feedback on #1024.
+    # hang.
     if not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ValueError(f"chunk_size must be a positive int, got {chunk_size!r}")
     if not isinstance(chunk_overlap, int) or chunk_overlap < 0:
@@ -659,12 +658,12 @@ def chunk_text(
         # ``start = end - chunk_overlap`` therefore advances only while
         # ``chunk_overlap <= chunk_size // 2``; a larger overlap makes ``start``
         # stall or move backward and the loop spins forever on short-line
-        # content (#2056). The largest safe value is ``chunk_size // 2`` (half,
+        # content. The largest safe value is ``chunk_size // 2`` (half,
         # rounded down for odd sizes), which still advances and stays allowed.
         raise ValueError(
             f"chunk_overlap ({chunk_overlap}) must be at most chunk_size // 2 "
             f"({chunk_size // 2}); a larger overlap can loop forever on "
-            f"short-line content (#2056)"
+            f"short-line content"
         )
     if not isinstance(min_chunk_size, int) or min_chunk_size < 0:
         raise ValueError(f"min_chunk_size must be a non-negative int, got {min_chunk_size!r}")
@@ -682,7 +681,7 @@ def chunk_text(
     # locators emitted below. These replace the previous per-chunk
     # ``content.count("\n", 0, pos)`` full-prefix rescans, which were O(pos)
     # each and O(N*K) over K chunks: a 287 MB / ~433k-chunk file scanned
-    # ~1.2e14 bytes and ran for days, indistinguishable from a hang (#2054).
+    # ~1.2e14 bytes and ran for days, indistinguishable from a hang.
     # ``start`` and ``end`` each advance monotonically for any
     # ``chunk_overlap < chunk_size // 2`` (the default 800/100 config and
     # every sane override), so counting only the newly-scanned span is O(N)
@@ -715,14 +714,13 @@ def chunk_text(
 
         chunk = content[start:end].strip()
         if len(chunk) >= min_chunk_size:
-            # Tier 6a — 1-indexed line range in the stripped source.
+            # 1-indexed line range in the stripped source.
             # Approximate locator (±1 at boundaries is fine for "jump to
             # roughly here"); exact-quote positioning is a future tier.
             # ``str.count`` with bounds (not slicing) still avoids allocating
-            # a substring per chunk, the original PR #1579 review concern
-            # (gemini-code-assist, medium priority). The incremental anchors
+            # a substring per chunk. The incremental anchors
             # additionally avoid rescanning the whole prefix each time, the
-            # actual O(N*K) cost (#2054). Two anchors because ``start`` and
+            # actual O(N*K) cost. Two anchors because ``start`` and
             # ``end`` are distinct monotonic sequences; a backward step
             # re-derives the value exactly from position 0.
             if start >= _start_anchor:
@@ -897,7 +895,7 @@ def _registry_write_target(registry_path):
 # Python 3.13 and later, and ``os.TMP_MAX`` -- 2_147_483_647 -- on 3.12 and
 # earlier, where the sweep runs for hours at roughly 21_000 names a second and
 # reads as a hang. Both callers below need the error instead: it is how they
-# learn the directory takes no new names. (#2530)
+# learn the directory takes no new names.
 _TEMP_NAME_ATTEMPTS = 8
 
 
@@ -1378,7 +1376,7 @@ def _extract_entities_for_metadata(content: str) -> str:
 
     coca_filter = _get_coca_filter()
     window = content[:_ENTITY_EXTRACT_WINDOW]
-    # Tier 3 linguistics cleanup — known-systems compound pre-pass. Detects
+    # Known-systems compound pre-pass. Detects
     # multi-word product names atomically and masks them from the window so
     # the single-word extraction below doesn't decompose them into their
     # constituent tokens (which would then either get COCA-filtered or
@@ -1389,7 +1387,7 @@ def _extract_entities_for_metadata(content: str) -> str:
     for w in words:
         if w in _ENTITY_STOPLIST:
             continue
-        # Tier 2 linguistics cleanup — drop common English content words
+        # Drop common English content words
         # ("Code", "Line", "Note", "Phase", …) from per-drawer entity
         # metadata so they don't poison hallways/tunnels/search.
         if w.lower() in coca_filter:
@@ -1407,7 +1405,7 @@ def _extract_entities_for_metadata(content: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tier 6a content-date extraction
+# Content-date extraction
 #
 # Hierarchy (first match wins):
 #   1. Filename — ISO regex on stem, then dateutil fuzzy parse for natural-
@@ -1435,15 +1433,15 @@ _SLASH_DATE_RE = re.compile(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b")
 
 # Gate for dateutil fallback. A candidate string must match ONE of these
 # patterns to be considered a real date — otherwise dateutil's fuzzy mode
-# would hallucinate dates from any digit-bearing text (Igor's reproductions
-# on PR #1584: "tmp_random_file_5" → 2026-05-05, "Version 3.3.6" → 2006-03-03,
+# would hallucinate dates from any digit-bearing text (for example
+# "tmp_random_file_5" → 2026-05-05, "Version 3.3.6" → 2006-03-03,
 # "Tested with 1000 drawers" → 1000-05-22, etc.). The fuzzy=True flag is
 # never set — dateutil only runs in strict mode on a substring we've
 # already validated.
 #
 # Three accepted shapes (all require a 4-digit year explicitly):
-#   1. Numeric: 4-digit year + separator + 1-2 digit month + separator + 1-2 digit day
-#      ("2024-11-08", "2024 11 08", "2024/06/15", "2024.11.08")
+#   1. Numeric: 4-digit year + separator + 1-2 digit month + separator + 1-2 digit day,
+#      for example 2024-11-08, 2024 11 08, 2024/06/15 or 2024.11.08
 #   2. Month-name + day + year: "November 8 2024", "Nov 8 2024", "Apr 6 2011"
 #   3. Day + month-name + year: "8 November 2024", "8 Nov 2024", "6 April 2011"
 #
@@ -1534,7 +1532,7 @@ def _try_frontmatter_date(content: str) -> Optional[str]:
     Uses ``str.find`` to locate the closing ``\\n---`` delimiter and slices
     the frontmatter directly. The earlier implementation split the entire
     file into lines just to scan the first handful — wasteful on large
-    files. Per PR #1579 review (gemini-code-assist, medium priority).
+    files.
     """
     if not content:
         return None
@@ -1591,7 +1589,7 @@ def _try_content_body_date(content: str) -> Optional[str]:
 
     Uses ``str.find`` to skip frontmatter and bounded ``str.split(..., 10)``
     to bound the head extraction — never materializes a full line-list on a
-    large file. Per PR #1579 review (gemini-code-assist, medium priority).
+    large file.
     """
     if not content:
         return None
@@ -1727,7 +1725,7 @@ def _build_drawer_metadata(
     of a file into a single ``collection.upsert`` — one embedding forward
     pass per batch instead of per chunk.
 
-    Tier 6a — ``line_start`` / ``line_end`` are optional 1-indexed line
+    ``line_start`` / ``line_end`` are optional 1-indexed line
     numbers in the source file. ``content_date`` is the optional ISO date
     extracted from filename / frontmatter / content body / mtime. When
     passed, they're stored in metadata so closet pointers can carry
@@ -1797,7 +1795,7 @@ def add_drawer(
     except OSError:
         source_mtime = None
     # An external caller's drawer names a source file the same way a mined one
-    # does, and ``sync`` decides both by the same rule (#2320).
+    # does, and ``sync`` decides both by the same rule.
     source_dir_ino = source_directory_identity(source_file)
     metadata = _build_drawer_metadata(
         wing,
@@ -1863,7 +1861,7 @@ def process_file(
     filed (pre- or post-lock re-check), unreadable (``OSError``), or
     too-short content (below ``min_chunk_size``). It is ``"chunk_cap"``
     when the per-file chunk cap aborted the file. Callers use the tag to
-    surface a separate counter in the mine summary (see #1455). It is
+    surface a separate counter in the mine summary. It is
     ``"purge_failed"`` when the stale-drawer purge raised: the new drawers
     stay marked unfinished, and the mine counts it as an error rather than a
     skip.
@@ -1943,7 +1941,7 @@ def process_file(
         # filed before this looked like.
         source_dir_ino = source_directory_identity(filepath)
 
-        # Tier 6a content-date: extract once per file (not per chunk) and
+        # Content date: extract once per file (not per chunk) and
         # share across all chunks. Reads filename / frontmatter / content /
         # mtime hierarchy. Returns None when nothing usable found → caller
         # falls back to filed_at downstream.
@@ -1993,7 +1991,7 @@ def process_file(
         if closets_col:
             purge_file_closets(closets_col, source_file)
         if closets_col and drawers_added > 0:
-            # Pass drawer_metas so build_closet_lines can emit the Tier 6a
+            # Pass drawer_metas so build_closet_lines can emit the
             # 4-segment pointer (``topic|entities|YYYY-MM-DD:Lstart-Lend|→ids``)
             # when line_start / line_end / content_date are present. Falls
             # back to the legacy 3-segment form automatically when not.
@@ -2114,8 +2112,8 @@ def scan_project(
             # Skip files exceeding size limit, or those whose stat() raises
             # (permission denied, racing delete, broken symlink that survived
             # the earlier is_symlink check). Both branches log to stderr to
-            # match the SKIP: (symlink) line above; silent drops at this
-            # gate were the original #923 complaint.
+            # match the SKIP: (symlink) line above, so no file is dropped
+            # here without a word.
             try:
                 file_stat = filepath.stat()
                 # Reject anything that is not a regular file before it can
@@ -2153,7 +2151,7 @@ def scan_project(
 
 
 # =============================================================================
-# MAIN: MINE
+# The project mine
 # =============================================================================
 
 
@@ -2180,7 +2178,7 @@ def mine(
     ``max_chunks_per_file`` overrides the per-file chunk cap (see
     :func:`_resolve_max_chunks_per_file`). ``None`` defers to
     ``MEMPALACE_MAX_CHUNKS_PER_FILE`` or ``MAX_CHUNKS_PER_FILE``; ``0``
-    disables the cap entirely (#1455).
+    disables the cap entirely.
     """
     if dry_run:
         return _mine_impl(
@@ -2280,7 +2278,7 @@ def _mine_impl(
         closets_col = get_closets_collection(palace_path)
         aaak_col = open_aaak_collection(palace_path)
         # One sqlite pass instead of one get(where=source_file) per file,
-        # which costs ~0.1 s each on a 1M-drawer palace (#2684). None on
+        # which costs ~0.1 s each on a 1M-drawer palace. None on
         # other backends: every file then takes the per-file check.
         mined_mtimes = prefetch_complete_mtimes(collection, [str(f) for f in files])
     else:
@@ -2334,7 +2332,7 @@ def _mine_impl(
             # modes so the summary "Files processed" arithmetic and the
             # residual-skip counter stay honest under ``--dry-run`` too. The
             # chunk-cap counter is partitioned out for its dedicated
-            # summary line (see #1455 + Gemini review on PR #1554). A file
+            # summary line. A file
             # that failed is neither skipped nor mined.
             if skip_reason == "purge_failed":
                 files_failed.append(str(filepath))
@@ -2449,7 +2447,7 @@ def _mine_impl(
         )
         sys.exit(130)
     except MineValidationError:
-        # End-of-mine FTS5 validation failed (#1537). The loop completed
+        # End-of-mine FTS5 validation failed. The loop completed
         # successfully; cmd_mine prints the recovery banner. Don't print a
         # "Mine aborted" partial-progress summary here: the mine didn't
         # abort mid-loop, the post-write integrity check did, and the
@@ -2459,7 +2457,7 @@ def _mine_impl(
         # Without this, an arbitrary exception (ONNX bad_alloc, chromadb HNSW
         # error, OS fault) propagates and the process exits with no completion
         # banner — the operator sees only the final progress line and assumes
-        # the mine succeeded (#1296). Print the partial-progress summary the
+        # the mine succeeded. Print the partial-progress summary the
         # way we do for KeyboardInterrupt, then re-raise so the original
         # traceback still surfaces and the exit code is non-zero.
         print("\n\n  Mine aborted by exception.")
@@ -2527,8 +2525,8 @@ def _cleanup_mine_pid_file() -> None:
         if not pid_file.exists():
             return
         recorded = pid_file.read_text().strip()
-        # PID file format: "{pid} {unix_timestamp}" (timestamp added in
-        # #1552 for stale-by-age detection).  Old-format files (bare
+        # PID file format: "{pid} {unix_timestamp}" (the timestamp drives
+        # stale-by-age detection).  Old-format files (bare
         # "{pid}") are also handled: split on whitespace and take the
         # first token as the PID.
         pid_token = recorded.split()[0] if recorded else ""
@@ -2593,7 +2591,7 @@ def status(palace_path: str):
 
     Tallies drawers by wing/room directly from ``chroma.sqlite3`` so a routine
     status check never cold-loads the HNSW vector index — a load that costs
-    tens of seconds of CPU per call on large palaces (#1681). Falls back to the
+    tens of seconds of CPU per call on large palaces. Falls back to the
     ChromaDB client path when the sqlite read is unavailable (missing DB,
     un-bootstrapped collection, or an unexpected schema); the fallback also
     emits the state-specific guidance for absent/empty palaces.
@@ -2611,7 +2609,7 @@ def status(palace_path: str):
         return
 
     # Preflight HNSW divergence before falling back to the ChromaDB client
-    # path: count() on a diverged segment can hit the #1222 SIGSEGV/panic
+    # path: count() on a diverged segment can hit a native SIGSEGV/panic
     # class, which a try/except around count() cannot catch. This fallback
     # only runs when the direct sqlite read above was unavailable, so it's
     # the one place in this function that still touches count() directly.
@@ -2622,7 +2620,7 @@ def status(palace_path: str):
         return
 
     # Fast path: single-pass metadata fetch for backends that expose
-    # get_all_metadata() (#1796). Avoids the O(n^2) offset loop below.
+    # get_all_metadata(). Avoids the O(n^2) offset loop below.
     get_all = getattr(col, "get_all_metadata", None)
     if callable(get_all):
         metas = [m or {} for m in get_all() if not is_bookkeeping(m)]
@@ -2633,7 +2631,7 @@ def status(palace_path: str):
         return
 
     # Count by wing and room — paginate to avoid SQLite "too many SQL
-    # variables" error on large palaces (see #802, #850).
+    # variables" error on large palaces.
     total = col.count()
     bookkeeping = 0
     wing_rooms: dict = defaultdict(lambda: defaultdict(int))

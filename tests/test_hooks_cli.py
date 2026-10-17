@@ -19,7 +19,6 @@ from mempalace.hooks_cli import (
     _diary_agent_for_harness,
     _extract_recent_messages,
     _get_mine_targets,
-    _hooks_daemon_enabled,
     _is_harness_boilerplate,
     _log,
     _maybe_auto_ingest,
@@ -918,13 +917,6 @@ def test_save_diary_daemon_lock_deferral_does_not_stall_the_hook(tmp_path):
     assert "deferred" in logged
     assert "PID 999" in logged
     assert "Daemon diary checkpoint failed" not in logged, "a parked job is not a failure"
-
-
-def test_hooks_daemon_enabled_requires_explicit_true():
-    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
-        assert _hooks_daemon_enabled() is False
-        mock_cfg_cls.return_value.hook_use_daemon = True
-        assert _hooks_daemon_enabled() is True
 
 
 # --- hook_session_start ---

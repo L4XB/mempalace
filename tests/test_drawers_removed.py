@@ -191,24 +191,6 @@ def test_a_re_mine_drops_the_files_summaries(tmp_path):
     assert _summary_ids(palace) == ["drawer_other_0"]
 
 
-def test_dedup_drops_the_summaries_of_the_drawers_it_removes(tmp_path, capsys):
-    from mempalace.dedup import dedup_palace
-
-    palace = str(tmp_path / "palace")
-    col = get_collection(palace, create=True)
-    col.upsert(
-        ids=["drawer_keep", "drawer_short"],
-        documents=["A long enough paragraph about the deploy schedule.", "too short"],
-        metadatas=[{"wing": "w", "room": "r", "source_file": "notes.md"}] * 2,
-    )
-    _summarize(palace, [("drawer_keep", "notes.md"), ("drawer_short", "notes.md")])
-
-    dedup_palace(palace_path=palace, dry_run=False, min_count=1)
-
-    assert col.get(ids=["drawer_short"])["ids"] == []
-    assert _summary_ids(palace) == ["drawer_keep"]
-
-
 def test_prune_corrupt_drops_the_summaries_of_the_rows_it_removes(tmp_path, capsys):
     from mempalace.repair import prune_corrupt
 

@@ -6,8 +6,7 @@ if __name__ != "mempalace.mcp_server":
 def _startup_preflight() -> None:
     """Startup SQLite integrity + HNSW capacity probes, off the protocol thread.
 
-    Runs the same checks the stdio loop used to run synchronously before
-    reading the first request. Failures must never take down the server: the
+    Failures must never take down the server: the
     lazy consumers (_ensure_sqlite_integrity_status, _get_client) re-run or
     re-check on demand, so an exception here only loses the early warning.
     """
@@ -38,9 +37,8 @@ def _drop_broken_stdout() -> None:
 
 # Stdio→hub proxying. When a long-lived HTTP hub (`mempalace serve`) owns
 # this palace, a stdio server spawned by an agent harness must not open its
-# own Chroma handles: it could only ever be a read-only peer (writer lease,
-# #1818), and racing writers are exactly what corrupted FTS5 indexes in the
-# wild. Instead the stdio process forwards every JSON-RPC request to the hub
+# own Chroma handles: it could only ever be a read-only peer (writer lease),
+# and racing writers corrupt FTS5 indexes. Instead the stdio process forwards every JSON-RPC request to the hub
 # verbatim, adding the local bearer token. This makes stdio-only harnesses
 # (plugins, desktop apps) share the hub with zero client-side reconfiguration.
 # Shares the CLI forwarder's kill switch (MEMPALACE_HUB_FORWARD=0).
@@ -210,9 +208,9 @@ def _run_stdio_loop() -> None:
     # Pre-flight in a background thread: PRAGMA quick_check reads every page
     # of chroma.sqlite3 (20s+ on multi-GB palaces) and running it before the
     # protocol loop starves the client's initialize timeout, even though the
-    # handshake itself never touches the database. The #1222 intent (warnings
-    # visible at startup rather than on first use) is preserved — the probe
-    # starts now and logs as soon as it finishes; tool calls that need the
+    # handshake itself never touches the database. Warnings still show at
+    # startup rather than on first use: the probe starts now and logs as soon
+    # as it finishes; tool calls that need the
     # verdict serialize on _sqlite_integrity_refresh_lock via
     # _ensure_sqlite_integrity_status instead of re-running the probe.
     threading.Thread(
@@ -223,11 +221,11 @@ def _run_stdio_loop() -> None:
 
     # Opt-in: pre-load the embedder so the first chromadb-write tool call
     # does not pay the ONNX/CoreML cold-load tax under the MCP client
-    # timeout (#1495). Default off — preserves current startup latency.
+    # timeout. Default off — preserves current startup latency.
     _maybe_eager_warmup_embedder()
 
     # Idle auto-exit: release ChromaDB file handles from stale servers
-    # that outlived their Claude Code session (#1552).
+    # that outlived their Claude Code session.
     _start_idle_exit_watchdog()
 
     # Say so when a chromadb write stops coming back, from a thread the stuck
@@ -309,11 +307,11 @@ def _writer_wait_seconds() -> float:
 def _acquire_writer_lease_for_http_startup() -> tuple[bool, str]:
     """Acquire the writer lease for writable HTTP startup, waiting if a peer holds it.
 
-    #2500: refusing at once turned a transient holder into an outage. A peer
+    Refusing at once would turn a transient holder into an outage. A peer
     session's MCP server, a hook-driven mine or a CLI write that holds the
     lease releases it when it finishes, but ``SystemExit(2)`` before binding
-    meant nothing retried, and under ``Restart=always`` the unit restarted
-    forever without ever starting. The server now retries for a bounded time
+    means nothing retries, and under ``Restart=always`` the unit would restart
+    forever without ever starting. So the server retries for a bounded time
     with backoff, logging once when the wait starts, and still exits 2 when
     the wait runs out so a supervisor sees a terminal failure.
 
@@ -364,7 +362,7 @@ def _run_http_loop() -> None:
     # A writable HTTP server is a long-lived storage client, so it must own the
     # local palace before it binds. Refusing at startup avoids advertising a
     # writable service that will only fail (or race) on its first mutation.
-    # A peer holding the lease is waited out for a bounded time first (#2500).
+    # A peer holding the lease is waited out for a bounded time first.
     # Explicit read-only HTTP remains safe to run beside the one writer owner.
     owns_writer_lease = False
     if not _READ_ONLY:
@@ -417,7 +415,7 @@ def _install_shutdown_signal_handlers() -> None:
     when the lock is acquired. CPython's default disposition for SIGTERM and
     SIGHUP is immediate termination, which skips ``atexit`` and leaves
     ``mine_palace_*.lock`` naming a dead PID until a contender's liveness
-    check reclaims it (#2205). Calling ``sys.exit(0)`` from the handler
+    check reclaims it. Calling ``sys.exit(0)`` from the handler
     unwinds the synchronous stdio/http loop and runs the existing release
     path. SIGHUP is Unix-only (SSH session disconnect); Windows only gets
     SIGTERM. Handlers are best-effort — signal registration only works from
@@ -444,9 +442,9 @@ def main():
 
     Parses ``sys.argv`` and applies ``--palace`` / ``--backend`` / ``--read-only``
     to the process, including ``MEMPALACE_PALACE_PATH`` and ``MEMPALACE_BACKEND``
-    in ``os.environ``; importing the package parses no argv (#2528).
+    in ``os.environ``; importing the package parses no argv.
 
-    Side effect: pops ``PYTHONPATH`` from ``os.environ`` (see #1423) so any
+    Side effect: pops ``PYTHONPATH`` from ``os.environ`` so any
     subprocess this server spawns inherits a clean env. Host applications that
     call ``main()`` programmatically should be aware that the parent process
     loses ``PYTHONPATH`` as well. Library imports do NOT trigger this side
@@ -455,8 +453,7 @@ def main():
     Transports:
     - ``stdio`` remains the default for existing Claude/MCP deployments.
     - ``http`` is opt-in and serves JSON-RPC POSTs at ``/mcp`` in the same
-      process, avoiding the long-lived stdio framing failure surface from
-      #1801.
+      process, avoiding the long-lived stdio framing failure surface.
     """
     global _args
 

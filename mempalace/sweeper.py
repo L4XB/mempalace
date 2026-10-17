@@ -322,7 +322,7 @@ def sweep(jsonl_path: str, palace_path: str, source_label: Optional[str] = None)
             "ingest_mode": "sweep",
         }
         # The directory this drawer's ``source_file`` sits in, so ``sync``
-        # decides a swept drawer by the same reading as a mined one (#2320).
+        # decides a swept drawer by the same reading as a mined one.
         if source_dir_ino:
             metadata["source_dir_ino"] = source_dir_ino
         metadata.update(encoding_metadata(rec["encoding"]))

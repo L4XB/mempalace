@@ -8,7 +8,7 @@ from argparse import Namespace
 import pytest
 
 from mempalace import palace_audit
-from mempalace.hallways import is_generic_entity
+from mempalace.hallways import entity_spelling_key, is_generic_entity
 from mempalace.palace_audit import (
     _analyze_hallways,
     _analyze_naming,
@@ -18,7 +18,6 @@ from mempalace.palace_audit import (
     _read_kg,
     audit_palace,
     drift_key,
-    hallway_entity_key,
     render_audit,
     terminal_progress,
 )
@@ -53,13 +52,13 @@ def test_drift_key_keeps_distinct_names_apart():
         ("device.zig", "src\\wireguard\\device.zig"),
     ],
 )
-def test_hallway_entity_key_collapses_self_links(a, b):
-    assert hallway_entity_key(a) == hallway_entity_key(b)
+def test_entity_spelling_key_collapses_self_links(a, b):
+    assert entity_spelling_key(a) == entity_spelling_key(b)
 
 
-def test_hallway_entity_key_keeps_methods_and_domains_apart():
-    assert hallway_entity_key("ChatStore") != hallway_entity_key("ChatStore.send")
-    assert hallway_entity_key("MemPalace") != hallway_entity_key("github.com")
+def test_entity_spelling_key_keeps_methods_and_domains_apart():
+    assert entity_spelling_key("ChatStore") != entity_spelling_key("ChatStore.send")
+    assert entity_spelling_key("MemPalace") != entity_spelling_key("github.com")
 
 
 def test_generic_entity_heuristic():

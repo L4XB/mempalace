@@ -122,7 +122,7 @@ def _bm25_only_via_sqlite(
 ) -> dict:
     """BM25-only search reading drawers directly from chroma.sqlite3.
 
-    Used when HNSW is diverged or unloadable (#1222). Bypasses chromadb's
+    Used when HNSW is diverged or unloadable. Bypasses chromadb's
     Python client entirely so a corrupt vector segment can't segfault the
     MCP server. Routes through chromadb's own FTS5 trigram index
     (``embedding_fulltext_search``) for candidate selection, then re-ranks

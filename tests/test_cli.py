@@ -18,6 +18,7 @@ import pytest
 from mempalace.cli import (
     cmd_compress,
     cmd_daemon,
+    cmd_export,
     cmd_hook,
     cmd_init,
     cmd_instructions,
@@ -116,6 +117,28 @@ def test_cmd_status_custom_palace(mock_config_cls):
 
         expected = os.path.expanduser("~/my_palace")
         mock_miner.status.assert_called_once_with(palace_path=expected)
+
+
+# ── cmd_export ─────────────────────────────────────────────────────────
+
+
+@patch("mempalace.cli.MempalaceConfig")
+def test_cmd_export_writes_the_configured_palace(mock_config_cls, tmp_path):
+    mock_config_cls.return_value.palace_path = "/fake/palace"
+    args = argparse.Namespace(palace=None, output_dir=str(tmp_path / "out"))
+    with patch("mempalace.exporter.export_palace") as mock_export:
+        cmd_export(args)
+    mock_export.assert_called_once_with("/fake/palace", str(tmp_path / "out"))
+
+
+def test_export_is_a_cli_command(tmp_path):
+    with patch("mempalace.exporter.export_palace") as mock_export:
+        with patch(
+            "sys.argv",
+            ["mempalace", "--palace", str(tmp_path / "p"), "export", str(tmp_path / "out")],
+        ):
+            main()
+    mock_export.assert_called_once_with(str(tmp_path / "p"), str(tmp_path / "out"))
 
 
 # ── cmd_search ─────────────────────────────────────────────────────────
@@ -277,6 +300,36 @@ def test_cmd_init_warns_and_skips_an_unknown_env_backend(tmp_path, monkeypatch, 
     saved = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
     assert "backend" not in saved
     assert "MEMPALACE_BACKEND not recorded" in capsys.readouterr().err
+
+
+def _init_with_embedding_model(tmp_path, monkeypatch, embedding_model):
+    from mempalace.config import MempalaceConfig as RealConfig
+
+    config_dir = tmp_path / "config"
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(
+        "mempalace.cli.MempalaceConfig", lambda: RealConfig(config_dir=str(config_dir))
+    )
+    args = argparse.Namespace(dir=str(project), yes=True, embedding_model=embedding_model)
+    with (
+        patch("mempalace.entity_detector.scan_for_detection", return_value=[]),
+        patch("mempalace.room_detector_local.detect_rooms_local"),
+        patch("mempalace.cli._run_pass_zero", return_value=None),
+        patch("mempalace.cli._maybe_run_mine_after_init"),
+    ):
+        cmd_init(args)
+    return json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
+
+
+def test_cmd_init_records_an_explicit_embedding_model(tmp_path, monkeypatch):
+    saved = _init_with_embedding_model(tmp_path, monkeypatch, "embeddinggemma")
+    assert saved["embedding_model"] == "embeddinggemma"
+
+
+def test_cmd_init_records_no_embedding_model_when_none_was_chosen(tmp_path, monkeypatch):
+    saved = _init_with_embedding_model(tmp_path, monkeypatch, None)
+    assert "embedding_model" not in saved
 
 
 @patch("mempalace.cli.MempalaceConfig")

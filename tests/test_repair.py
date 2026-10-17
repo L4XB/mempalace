@@ -1675,7 +1675,7 @@ def test_max_seq_id_detects_poison_rows(tmp_path):
         seg["closets_vec"],
         seg["closets_meta"],
     }
-    for sid, val in found:
+    for _sid, val in found:
         assert val > repair.MAX_SEQ_ID_SANITY_THRESHOLD
     assert "seg-clean" not in ids
 
@@ -3087,7 +3087,7 @@ def test_preview_legacy_repair_leaves_the_palace_byte_identical(tmp_path, capsys
     assert [p for p in tmp_path.iterdir() if p.name.endswith(".backup")] == []
     out = capsys.readouterr().out
     assert "holds 6 rows" in out
-    assert "#1208 truncation guard" in out
+    assert "(the truncation guard)" in out
 
 
 def test_cmd_repair_dry_run_leaves_a_real_palace_byte_identical(tmp_path, capsys):
@@ -3218,7 +3218,7 @@ def test_preview_legacy_repair_reports_the_truncation_guard_as_disabled(tmp_path
 
     out = capsys.readouterr().out
     assert counts == {"mempalace_drawers": 3}
-    assert "#1208 truncation guard is DISABLED" in out
+    assert "the truncation guard is DISABLED" in out
     assert "the difference would be destroyed" in out
     assert "abort without changes" not in out
 

@@ -60,7 +60,7 @@ _PAYLOAD_METADATA = "metadata"
 _POINT_NAMESPACE = uuid.UUID("c06c3fc7-5c14-4dc4-84c2-24a5f72d8dc1")
 _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
 # Page size for Qdrant's /points/scroll cursor. 4096 (up from the original
-# 256) cuts REST round-trips ~16x for any full-collection walk (#1796).
+# 256) cuts REST round-trips ~16x for any full-collection walk.
 # Qdrant's own docs suggest larger scroll batches are safe, and this is well
 # below typical REST payload-size limits for metadata-only (with_vector=False)
 # scrolls such as get_all_metadata().
@@ -70,8 +70,7 @@ _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
 # for the $or/$contains local-filter query fallback. At 4096 rows per page,
 # high-dimensional embeddings make those particular responses tens of MB --
 # Qdrant handles it and round-trips still drop overall, but this is a real
-# trade-off, not a metadata-only optimization. (Noted in maintainer review
-# on #1832.)
+# trade-off, not a metadata-only optimization.
 _SCROLL_PAGE_SIZE = 4096
 _SUPPORTED_OPERATORS = frozenset(
     {"$eq", "$ne", "$in", "$nin", "$and", "$or", "$contains", "$gt", "$gte", "$lt", "$lte"}
@@ -798,14 +797,13 @@ class QdrantCollection(BaseCollection):
             qdrant_filter=q_filter, with_vector=with_vector, max_rows=bounded_rows
         )
         id_set = None if ids is None else set(ids)
-        rows = [
+        return [
             row
             for row in rows
             if (id_set is None or row["id"] in id_set)
             and _matches_where(row["metadata"], where)
             and _matches_where_document(row["document"], where_document)
         ]
-        return rows
 
     def add(self, *, documents, ids, metadatas=None, embeddings=None):
         _validate_write_batch(
@@ -1008,7 +1006,7 @@ class QdrantCollection(BaseCollection):
         )
 
     def get_all_metadata(self, where: Optional[dict] = None) -> list[dict]:
-        """Return every matching record's metadata in one cursor pass (#1796).
+        """Return every matching record's metadata in one cursor pass.
 
         Overrides the default offset-paginated implementation, which would
         call self.get(limit=, offset=) in a loop -- and since self.get() is
@@ -1022,7 +1020,7 @@ class QdrantCollection(BaseCollection):
         pass followed by an unconditional _matches_where() re-check on every
         row -- the same filter logic get(), delete(), and lexical_search()
         already use, so this can't independently drift from those call
-        sites. (Maintainer review on #1832: avoid duplicating the filter
+        sites. (Avoid duplicating the filter
         dance inline.)
         """
         rows = self._rows(where=where)
@@ -1033,10 +1031,10 @@ class QdrantCollection(BaseCollection):
     ) -> GetResult:
         """Every matching row's id plus the requested fields in one cursor pass.
 
-        Same reasoning as :meth:`get_all_metadata` (#1796): the default
+        Same reasoning as :meth:`get_all_metadata`: the default
         implementation would call ``get(limit=, offset=)`` in a loop, and each
-        of those calls re-walks the collection from the start (#2452 measured
-        275 s for ``list_drawers`` on 126k drawers). ``_rows()`` already has
+        of those calls re-walks the collection from the start (measured
+        at 275 s for ``list_drawers`` on 126k drawers). ``_rows()`` already has
         every id in hand, so hand them back instead of discarding them.
         """
         spec = _IncludeSpec.resolve(
@@ -1060,7 +1058,7 @@ class QdrantCollection(BaseCollection):
         # Validate the filter before the existence short-circuit so an
         # unsupported local-only filter raises regardless of whether the
         # collection has been materialized yet — matching the order used by
-        # get()/lexical_search() above (#1835 review).
+        # get()/lexical_search() above.
         _validate_where(where)
         if _requires_local_filter(where):
             raise UnsupportedCapabilityError("facet_counts does not support local-only filters")

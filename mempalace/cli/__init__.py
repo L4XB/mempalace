@@ -24,6 +24,7 @@ Commands:
     mempalace wake-up                     Show L0 + L1 wake-up context
     mempalace wake-up --wing my_app       Wake-up for a specific project
     mempalace status                      Show what's been filed
+    mempalace export <dir>                Export the palace as markdown files
     mempalace audit                       Score how well organized the palace is
 
 Examples:

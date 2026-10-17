@@ -7,7 +7,7 @@ if __name__ != "mempalace.mcp_server":
 
 
 def _tool_status_via_sqlite() -> dict:
-    """Pure-sqlite status reader for the #1222 fallback path.
+    """Pure-sqlite status reader for the diverged-HNSW fallback path.
 
     When the HNSW capacity probe detects divergence, opening the chromadb
     persistent client can segfault. This reader pulls the same wing/room
@@ -85,7 +85,7 @@ def _tool_status_via_sqlite() -> dict:
 
 
 def _sqlite_taxonomy():
-    """Fast wing→room tally from the backend's sqlite metadata (#1748 / #1379).
+    """Fast wing→room tally from the backend's sqlite metadata.
 
     Returns ``(total, {wing: {room: count}})`` or ``None`` to signal the
     caller to fall back to the collection pagination path. ``None`` means
@@ -156,8 +156,7 @@ def _sqlite_taxonomy():
 
 
 def _sqlite_graph_stats():
-    """Compute ``graph_stats`` from one grouped sqlite read (#1379, graph_stats
-    half; follow-up to #1748).
+    """Compute ``graph_stats`` from one grouped sqlite read.
 
     ``graph_stats`` only needs grouped counts, but the client path builds the
     whole graph by paging every metadata row (``build_graph`` →
@@ -362,8 +361,8 @@ def tool_status():
             result["partial"] = True
         return result
 
-    # Run the safe sqlite/pickle probe before we touch chromadb. In the
-    # #1222 failure mode, opening the persistent client to call .count()
+    # Run the safe sqlite/pickle probe before we touch chromadb. With a
+    # diverged HNSW index, opening the persistent client to call .count()
     # can segfault — short-circuit to a pure-sqlite path when divergence
     # is detected so status stays reachable.
     db_exists = _backend_db_exists()
@@ -374,7 +373,7 @@ def tool_status():
 
     # Fast path: tally wing/room straight from sqlite so overview tools stay
     # responsive on large palaces instead of cold-loading the HNSW index or
-    # paging hundreds of MB of metadata through the client (#1748 / #1379).
+    # paging hundreds of MB of metadata through the client.
     # ``None`` (non-chroma backend / non-standard layout) falls through to the
     # client path below.
     fast = _sqlite_taxonomy()
@@ -398,7 +397,7 @@ def tool_status():
 
     # Use create=True only when a palace DB already exists on disk -- this
     # bootstraps the ChromaDB collection on a valid-but-empty palace without
-    # accidentally creating a palace in a non-existent directory (#830).
+    # accidentally creating a palace in a non-existent directory.
     col = _get_collection(create=db_exists)
     if not col:
         return _collection_error_or_no_palace()
@@ -656,16 +655,8 @@ def tool_search(
     except ValueError as e:
         return {"error": str(e)}
     # since/before are validated inside search_memories (shared
-    # parse_window), which returns the same {"error": ...} shape.
-    candidate_strategy = candidate_strategy or "vector"
-    if not isinstance(candidate_strategy, str) or candidate_strategy not in {"vector", "union"}:
-        return {"error": "candidate_strategy must be one of ('vector', 'union')"}
-    if (
-        not isinstance(include_media, bool)
-        or not isinstance(query_task, str)
-        or query_task not in {"search", "code"}
-    ):
-        return {"error": "include_media must be boolean and query_task must be 'search' or 'code'"}
+    # parse_window), which returns the same {"error": ...} shape. Argument
+    # types and enums are checked against the schema at dispatch.
     if cli_compatible and (include_media or query_task != "search"):
         return {"error": "cli_compatible cannot be combined with media/code task search"}
     experimental = {
@@ -676,7 +667,7 @@ def tool_search(
         )
         if value != default
     }
-    # Mitigate system prompt contamination (Issue #333)
+    # Mitigate system prompt contamination.
     sanitized = sanitize_query(query)
     if cli_compatible:
         import contextlib
@@ -754,7 +745,7 @@ def tool_search(
     # Ensure the vector-disabled probe has been run via the safe
     # sqlite/pickle path before we touch chromadb. Calling _get_client()
     # here would defeat the fallback — it constructs a PersistentClient
-    # which can segfault on segment load in the #1222 failure mode.
+    # which can segfault on segment load when the HNSW index has diverged.
     _refresh_vector_disabled_flag()
     result = search_memories(
         sanitized["clean_query"],
@@ -772,7 +763,7 @@ def tool_search(
         **experimental,
     )
     if _is_transient_index_error(result):
-        # Post-bulk-write HNSW flush window (#1315): drop caches, give
+        # Post-bulk-write HNSW flush window: drop caches, give
         # the segment a moment to settle, retry once. Caller never sees
         # the transient unless the second attempt also fails.
         _force_chroma_cache_reset()
@@ -875,8 +866,8 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
     """Walk the palace graph from a room. Find connected ideas across wings."""
     max_hops = max(1, min(max_hops, 10))
     # sqlite metadata path does not open HNSW. When it cannot serve, open the
-    # collection here so a missing/broken palace still reports why (#1379
-    # follow-up) instead of looking like a palace with no such room.
+    # collection here so a missing/broken palace still reports why instead
+    # of looking like a palace with no such room.
     if _graph_sqlite_reader() is None:
         col = _get_collection()
         if not col:
@@ -909,8 +900,8 @@ def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
 def tool_graph_stats():
     """Palace graph overview: nodes, tunnels, edges, connectivity."""
     # Fast path: grouped sqlite read instead of paging all metadata and
-    # cold-loading HNSW via build_graph(), which times out on large palaces
-    # (#1379). Falls through to the client path for non-chroma backends.
+    # cold-loading HNSW via build_graph(), which times out on large palaces.
+    # Falls through to the client path for non-chroma backends.
     fast = _sqlite_graph_stats()
     if fast is not None:
         return fast
@@ -947,7 +938,7 @@ def tool_create_tunnel(
     # missing endpoints (empty/non-string names, and create_tunnel's
     # room-existence checks). Catch both so the real reason is surfaced
     # instead of escaping and being wrapped as the opaque "Internal tool
-    # error" (#1473), mirroring sibling tools.
+    # error", mirroring sibling tools.
     try:
         source_wing = sanitize_name(source_wing, "source_wing")
         source_room = sanitize_name(source_room, "source_room")
@@ -993,11 +984,6 @@ def tool_list_hallways(wing: str = None, limit: int = 100, offset: int = 0):
         wing = _sanitize_optional_name(wing, "wing")
     except ValueError as e:
         return {"error": str(e)}
-    try:
-        limit = max(1, min(int(limit), 500))
-        offset = max(0, int(offset))
-    except (TypeError, ValueError):
-        return {"error": "limit and offset must be integers"}
     rows = sorted(list_hallways(wing), key=lambda h: -int(h.get("co_occurrence_count") or 0))
     page = rows[offset : offset + limit]
     return {

@@ -12,7 +12,6 @@ Coverage map:
   * purge_file_closets — scoped to source_file.
   * Project-miner end-to-end rebuild — re-mining with fewer topics fully
     purges leftover numbered closets from a larger prior run.
-  * _extract_drawer_ids_from_closet — pointer parsing + dedup.
   * search_memories hybrid path — drawer query always the floor,
     closets boost matching source_file, matched_via reflects both signals,
     no whole-file glue, max_distance enforcement.
@@ -57,7 +56,6 @@ from mempalace.palace_graph import (
 from mempalace.searcher import (
     _bm25_scores,
     _enrich_closet_hits,
-    _extract_drawer_ids_from_closet,
     _hybrid_rank,
     search_memories,
 )
@@ -500,26 +498,6 @@ class TestMinerClosetRebuild:
                         f"closet line with date locator must be 4 segments, "
                         f"got {len(parts)}: {line!r}"
                     )
-
-
-# ── _extract_drawer_ids_from_closet ───────────────────────────────────
-
-
-class TestExtractDrawerIds:
-    def test_parses_single_pointer(self):
-        assert _extract_drawer_ids_from_closet("topic|;|→drawer_x") == ["drawer_x"]
-
-    def test_parses_multiple_pointers_per_line(self):
-        line = "topic|ent|→drawer_a,drawer_b,drawer_c"
-        assert _extract_drawer_ids_from_closet(line) == ["drawer_a", "drawer_b", "drawer_c"]
-
-    def test_dedupes_across_lines(self):
-        doc = "one|;|→drawer_a,drawer_b\ntwo|;|→drawer_b,drawer_c"
-        assert _extract_drawer_ids_from_closet(doc) == ["drawer_a", "drawer_b", "drawer_c"]
-
-    def test_empty_doc_returns_empty(self):
-        assert _extract_drawer_ids_from_closet("") == []
-        assert _extract_drawer_ids_from_closet("no arrows here") == []
 
 
 # ── search_memories closet-first path ────────────────────────────────

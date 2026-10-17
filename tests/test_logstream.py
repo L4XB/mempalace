@@ -628,22 +628,22 @@ class TestWatchEvents:
 
 class TestWatchCursorFile:
     def test_roundtrip(self, tmp_path):
-        from mempalace.logstream import read_watch_cursor, write_watch_cursor
+        from mempalace.logstream import WATCH_STATE_OK, read_watch_state, write_watch_cursor
 
         path = str(tmp_path / "nested" / "cursor.json")
         write_watch_cursor(path, "evt_abc", agent="mac-claude")
-        assert read_watch_cursor(path) == "evt_abc"
+        assert read_watch_state(path) == ("evt_abc", WATCH_STATE_OK)
 
     def test_missing_or_corrupt_file_is_not_fatal(self, tmp_path):
         """A truncated state file costs a replay; refusing to start costs
         every event after it."""
-        from mempalace.logstream import read_watch_cursor
+        from mempalace.logstream import WATCH_STATE_ABSENT, WATCH_STATE_CORRUPT, read_watch_state
 
-        assert read_watch_cursor(str(tmp_path / "absent.json")) is None
+        assert read_watch_state(str(tmp_path / "absent.json")) == (None, WATCH_STATE_ABSENT)
         corrupt = tmp_path / "corrupt.json"
         corrupt.write_text("{not json", encoding="utf-8")
-        assert read_watch_cursor(str(corrupt)) is None
-        assert read_watch_cursor(None) is None
+        assert read_watch_state(str(corrupt)) == (None, WATCH_STATE_CORRUPT)
+        assert read_watch_state(None) == (None, WATCH_STATE_ABSENT)
 
     def test_write_leaves_no_temp_file_behind(self, tmp_path):
         from mempalace.logstream import write_watch_cursor
@@ -659,12 +659,12 @@ class TestWatchCursorFile:
         AttributeError, which would stop the watcher from starting — the
         exact opposite of the recovery contract.
         """
-        from mempalace.logstream import read_watch_cursor
+        from mempalace.logstream import WATCH_STATE_CORRUPT, read_watch_state
 
         for payload in ("null", "[]", '"evt_abc"', "42"):
             path = tmp_path / f"cursor_{abs(hash(payload))}.json"
             path.write_text(payload, encoding="utf-8")
-            assert read_watch_cursor(str(path)) is None
+            assert read_watch_state(str(path)) == (None, WATCH_STATE_CORRUPT)
 
     def test_conditions_distinguish_absent_empty_and_corrupt(self, tmp_path):
         """ "No cursor" is four facts; only ``absent`` may start at the tip."""

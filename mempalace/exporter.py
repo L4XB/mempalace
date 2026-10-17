@@ -69,7 +69,7 @@ def _safe_open_for_write(path: str, mode: str, encoding: str = "utf-8"):
     return open(path, mode, encoding=encoding, errors="surrogateescape")
 
 
-def export_palace(palace_path: str, output_dir: str, format: str = "markdown") -> dict:
+def export_palace(palace_path: str, output_dir: str) -> dict:
     """Export all palace drawers as markdown files organized by wing/room.
 
     Streams drawers in batches of 1000 and writes each wing/room file
@@ -79,7 +79,6 @@ def export_palace(palace_path: str, output_dir: str, format: str = "markdown") -
     Args:
         palace_path: Path to the ChromaDB palace directory.
         output_dir: Where to write the exported markdown tree.
-        format: Output format (currently only "markdown").
 
     Returns:
         Stats dict: {"wings": N, "rooms": N, "drawers": N}

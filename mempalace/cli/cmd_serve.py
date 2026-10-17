@@ -70,7 +70,7 @@ def _server_is_loopback(host: str) -> bool:
 
 
 def cmd_serve(args):
-    """Run a secure remote HTTP MCP server for a team to share one palace (#1877).
+    """Run a secure remote HTTP MCP server for a team to share one palace.
 
     A turnkey wrapper over ``mempalace-mcp --transport http``: on a network bind
     it resolves a bearer token (reusing or auto-generating the palace's stored
@@ -220,7 +220,7 @@ def cmd_compress(args):
         dialect = Dialect()
 
     # State-aware open: distinguish "no palace" from "initialized but empty"
-    # from "corrupt" via the shared helper (#1498). MCP and library callers
+    # from "corrupt" via the shared helper. MCP and library callers
     # catch the backend exceptions directly; CLI gets the friendly print.
     from ..palace import _open_collection_or_explain
 

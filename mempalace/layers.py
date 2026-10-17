@@ -208,7 +208,7 @@ def fetch_recent_window(
             kwargs = {"include": ["documents", "metadatas"], "limit": batch_size, "offset": offset}
             if where:
                 kwargs["where"] = where
-            batch = _read_with_retry(lambda: col.get(**kwargs), deadline, no_retry)
+            batch = _read_with_retry(lambda kwargs=kwargs: col.get(**kwargs), deadline, no_retry)
             batch_docs = batch.get("documents") or []
             batch_metas = batch.get("metadatas") or []
             if not batch_docs:
@@ -386,7 +386,7 @@ class Layer1:
         # The candidate window this sorts is now the MAX_SCAN *most recently
         # filed* drawers rather than the first MAX_SCAN the backend happened to
         # hand back, so on a palace larger than MAX_SCAN the newest drawers are
-        # actually in the running (#1630's known limitation).
+        # actually in the running.
         scored = []
         for doc, meta in zip(docs, metas):
             meta = meta or {}
@@ -649,7 +649,7 @@ class MemoryStack:
         """
         parts = []
 
-        # L0: Identity
+        # L0 is the identity layer.
         parts.append(self.l0.render())
         parts.append("")
 
@@ -708,7 +708,7 @@ class MemoryStack:
 
 
 # ---------------------------------------------------------------------------
-# CLI (standalone)
+# Standalone command line
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

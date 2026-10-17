@@ -433,7 +433,8 @@ def test_layer1_read_that_blocks_past_the_budget_is_cut_off():
         _release_stuck_reader(release)
 
     assert "could not be read right now (TimeoutError)" in result
-    assert elapsed < 0.45
+    # The read blocks for 5 s; the bound only needs to prove the 300 ms budget cut it off.
+    assert elapsed < 1.5
     mock_col.get.assert_not_called()
 
 
