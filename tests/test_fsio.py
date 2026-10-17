@@ -204,12 +204,17 @@ def test_abandoned_temp_sweep_touches_only_this_files_temporaries(tmp_path):
         os.utime(tmp_path / name, (an_hour_ago, an_hour_ago))
     target = tmp_path / "kept-target"
     target.write_text("x", encoding="utf-8")
+    link = tmp_path / "state.json.tmp-78"
     try:
-        os.symlink(target, tmp_path / "state.json.tmp-78")
-        os.utime(tmp_path / "state.json.tmp-78", (an_hour_ago, an_hour_ago), follow_symlinks=False)
-        kept.append("state.json.tmp-78")
+        os.symlink(target, link)
     except (OSError, NotImplementedError):
-        pass  # no symlink privilege (Windows), or no lutimes
+        pass  # no symlink privilege (Windows)
+    else:
+        kept.append(link.name)
+        # Age the link itself where the platform can (not on Windows); a
+        # fresh link is kept by the age check alone.
+        if os.utime in os.supports_follow_symlinks:
+            os.utime(link, (an_hour_ago, an_hour_ago), follow_symlinks=False)
 
     legacy = re.compile(r"\.state-[a-z]{3}\.tmp")
     assert fsio.remove_abandoned_publish_temps(dest, older_than=600, legacy=legacy) == 3
