@@ -177,9 +177,9 @@ def _save_hallways(hallways: list[dict], config=None) -> None:
     directory = os.path.dirname(hallway_file)
     os.makedirs(directory, exist_ok=True)
     # A save killed before its rename leaves a partial copy of the whole file,
-    # hundreds of MB on a large palace, and no later save reuses its name
-    # (#2756). Callers hold the hallway-file lock, so no other save of this
-    # file is running; the age check also spares a writer outside that lock.
+    # hundreds of MB on a large palace, and no later save reuses its name.
+    # Callers hold the hallway-file lock, so no other save of this file is
+    # running; the age check also spares a writer outside that lock.
     removed = _remove_abandoned_publish_temps(
         hallway_file, older_than=_ABANDONED_TEMP_SECONDS, legacy=_LEGACY_TEMP_NAME
     )
