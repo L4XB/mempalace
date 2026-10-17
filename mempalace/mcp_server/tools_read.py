@@ -18,6 +18,7 @@ def _tool_status_via_sqlite() -> dict:
     import sqlite3 as _sqlite3
 
     from ..backends._inproc_sqlite import open_reader as open_palace_reader
+    from ..backends.chroma import not_bookkeeping_sql
 
     db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
     if not os.path.isfile(db_path):
@@ -30,20 +31,21 @@ def _tool_status_via_sqlite() -> dict:
     try:
         conn = open_palace_reader(db_path)
         try:
+            drawers_only = not_bookkeeping_sql(conn)
             row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*)
                 FROM embeddings e
                 JOIN segments s ON e.segment_id = s.id
                 JOIN collections c ON s.collection = c.id
-                WHERE c.name = ?
+                WHERE c.name = ? AND {drawers_only}
                 """,
                 (collection_name,),
             ).fetchone()
             total = int(row[0]) if row and row[0] is not None else 0
             for key, target in (("wing", wings), ("room", rooms)):
                 for value, count in conn.execute(
-                    """
+                    f"""
                     SELECT em.string_value, COUNT(*)
                     FROM embedding_metadata em
                     JOIN embeddings e ON em.id = e.id
@@ -52,11 +54,12 @@ def _tool_status_via_sqlite() -> dict:
                     WHERE c.name = ?
                       AND em.key = ?
                       AND em.string_value IS NOT NULL
+                      AND {drawers_only}
                     GROUP BY em.string_value
                     """,
                     (collection_name, key),
                 ):
-                    target[value] = count
+                    target[decode_value(value)] = count
         finally:
             conn.close()
     except _sqlite3.Error:
@@ -282,6 +285,72 @@ def _chroma_room_wing_hall_counts():
     return rows
 
 
+def _bookkeeping_taxonomy(col) -> dict:
+    """``{wing: {room: n}}`` of the registry rows and sentinels, to subtract
+    from facet counts. One metadata-only read; empty when it fails."""
+    try:
+        got = col.get(where=BOOKKEEPING_WHERE, include=["metadatas"])
+        metas = got.get("metadatas") if hasattr(got, "get") else None
+    except Exception:
+        logger.debug("bookkeeping row read failed", exc_info=True)
+        metas = None
+    taxonomy: dict = {}
+    for m in metas if isinstance(metas, list) else []:
+        m = m or {}
+        if is_bookkeeping(m):
+            dest = taxonomy.setdefault(m.get("wing", "unknown"), {})
+            room = m.get("room", "unknown")
+            dest[room] = dest.get(room, 0) + 1
+    return taxonomy
+
+
+def _subtract_counts(counts: dict, key, n: int) -> None:
+    left = counts.get(key, 0) - n
+    if left > 0:
+        counts[key] = left
+    else:
+        counts.pop(key, None)
+
+
+def _drop_bookkeeping_facets(col, wings=None, rooms=None, taxonomy=None, wing=None) -> int:
+    """Take registry rows and sentinels out of facet tallies; return how many."""
+    dropped = 0
+    for w, room_counts in _bookkeeping_taxonomy(col).items():
+        if wing is not None and w != wing:
+            continue
+        for r, n in room_counts.items():
+            dropped += n
+            if wings is not None:
+                _subtract_counts(wings, w, n)
+            if rooms is not None:
+                _subtract_counts(rooms, r, n)
+            if taxonomy is not None and w in taxonomy:
+                _subtract_counts(taxonomy[w], r, n)
+                if not taxonomy[w]:
+                    del taxonomy[w]
+    return dropped
+
+
+def _tally_wings_rooms(all_meta, wings=None, rooms=None, taxonomy=None) -> int:
+    """Count drawers by wing and room, leaving out bookkeeping rows."""
+    total = 0
+    for m in all_meta:
+        m = m or {}
+        if is_bookkeeping(m):
+            continue
+        total += 1
+        w = m.get("wing", "unknown")
+        r = m.get("room", "unknown")
+        if wings is not None:
+            wings[w] = wings.get(w, 0) + 1
+        if rooms is not None:
+            rooms[r] = rooms.get(r, 0) + 1
+        if taxonomy is not None:
+            dest = taxonomy.setdefault(w, {})
+            dest[r] = dest.get(r, 0) + 1
+    return total
+
+
 def tool_status():
     _ensure_sqlite_integrity_status()
     if _sqlite_integrity_errors:
@@ -324,6 +393,7 @@ def tool_status():
             "protocol": PALACE_PROTOCOL,
             "aaak_dialect": AAAK_SPEC,
             "backend": _selected_backend_name(),
+            "embedding_device": _describe_device_safe(),
         }
 
     # Use create=True only when a palace DB already exists on disk -- this
@@ -342,6 +412,7 @@ def tool_status():
         "protocol": PALACE_PROTOCOL,
         "aaak_dialect": AAAK_SPEC,
         "backend": _selected_backend_name(),
+        "embedding_device": _describe_device_safe(),
     }
     try:
         if _supports_metadata_facets(col):
@@ -363,6 +434,7 @@ def tool_status():
                         rooms["unknown"] = rooms.get("unknown", 0) + unknown_rooms
                 except (TypeError, ValueError):
                     pass
+                result["total_drawers"] = count - _drop_bookkeeping_facets(col, wings, rooms)
 
             except Exception as e:
                 logger.warning(
@@ -370,21 +442,11 @@ def tool_status():
                 )
                 rooms.clear()
                 wings.clear()
-                all_meta = _get_cached_metadata(col)
-                for m in all_meta:
-                    m = m or {}
-                    w = m.get("wing", "unknown")
-                    r = m.get("room", "unknown")
-                    wings[w] = wings.get(w, 0) + 1
-                    rooms[r] = rooms.get(r, 0) + 1
+                result["total_drawers"] = _tally_wings_rooms(
+                    _get_cached_metadata(col), wings, rooms
+                )
         else:
-            all_meta = _get_cached_metadata(col)
-            for m in all_meta:
-                m = m or {}
-                w = m.get("wing", "unknown")
-                r = m.get("room", "unknown")
-                wings[w] = wings.get(w, 0) + 1
-                rooms[r] = rooms.get(r, 0) + 1
+            result["total_drawers"] = _tally_wings_rooms(_get_cached_metadata(col), wings, rooms)
     except Exception as e:
         logger.exception("tool_status metadata fetch failed")
         result["error"] = str(e)
@@ -450,17 +512,14 @@ def tool_list_wings():
                     wings["unknown"] = wings.get("unknown", 0) + unknown_wings
             except (TypeError, ValueError):
                 pass
+            _drop_bookkeeping_facets(col, wings=wings)
         except Exception as e:
             if _supports_metadata_facets(col):
                 logger.warning(
                     "Failed to fetch metadata facets, falling back to client-side loop: %s", e
                 )
             wings.clear()
-            all_meta = _get_cached_metadata(col)
-            for m in all_meta:
-                m = m or {}
-                w = m.get("wing", "unknown")
-                wings[w] = wings.get(w, 0) + 1
+            _tally_wings_rooms(_get_cached_metadata(col), wings=wings)
     except Exception as e:
         logger.exception("tool_list_wings metadata fetch failed")
         result["error"] = str(e)
@@ -505,17 +564,14 @@ def tool_list_rooms(wing: str = None):
                     rooms["unknown"] = rooms.get("unknown", 0) + unknown_rooms
             except (TypeError, ValueError):
                 pass
+            _drop_bookkeeping_facets(col, rooms=rooms, wing=wing)
         except Exception as e:
             if _supports_metadata_facets(col):
                 logger.warning(
                     "Failed to fetch metadata facets, falling back to client-side loop: %s", e
                 )
             rooms.clear()
-            all_meta = _fetch_all_metadata(col, where=where)
-            for m in all_meta:
-                m = m or {}
-                r = m.get("room", "unknown")
-                rooms[r] = rooms.get(r, 0) + 1
+            _tally_wings_rooms(_fetch_all_metadata(col, where=where), rooms=rooms)
     except Exception as e:
         logger.exception("tool_list_rooms metadata fetch failed")
         result["error"] = str(e)
@@ -557,24 +613,23 @@ def tool_get_taxonomy():
                         pass
                     temp_taxonomy[wing] = room_counts
                 taxonomy.update(temp_taxonomy)
+            _drop_bookkeeping_facets(col, taxonomy=taxonomy)
         except Exception as e:
             if _supports_metadata_facets(col):
                 logger.warning(
                     "Failed to fetch metadata facets, falling back to client-side loop: %s", e
                 )
-            all_meta = _get_cached_metadata(col)
-            for m in all_meta:
-                m = m or {}
-                w = m.get("wing", "unknown")
-                r = m.get("room", "unknown")
-                if w not in taxonomy:
-                    taxonomy[w] = {}
-                taxonomy[w][r] = taxonomy[w].get(r, 0) + 1
+            _tally_wings_rooms(_get_cached_metadata(col), taxonomy=taxonomy)
     except Exception as e:
         logger.exception("tool_get_taxonomy metadata fetch failed")
         result["error"] = str(e)
         result["partial"] = True
     return result
+
+
+# The cosine distance ``min_similarity >= 1.0`` maps to: float error on an
+# identical vector stays below it.
+_EXACT_MATCH_DISTANCE = 1e-5
 
 
 def tool_search(
@@ -590,6 +645,8 @@ def tool_search(
     context: str = None,
     candidate_strategy: str = "vector",
     cli_compatible: bool = False,
+    include_media: bool = False,
+    query_task: str = "search",
 ):
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
@@ -603,6 +660,22 @@ def tool_search(
     candidate_strategy = candidate_strategy or "vector"
     if not isinstance(candidate_strategy, str) or candidate_strategy not in {"vector", "union"}:
         return {"error": "candidate_strategy must be one of ('vector', 'union')"}
+    if (
+        not isinstance(include_media, bool)
+        or not isinstance(query_task, str)
+        or query_task not in {"search", "code"}
+    ):
+        return {"error": "include_media must be boolean and query_task must be 'search' or 'code'"}
+    if cli_compatible and (include_media or query_task != "search"):
+        return {"error": "cli_compatible cannot be combined with media/code task search"}
+    experimental = {
+        name: value
+        for name, value, default in (
+            ("include_media", include_media, False),
+            ("query_task", query_task, "search"),
+        )
+        if value != default
+    }
     # Mitigate system prompt contamination (Issue #333)
     sanitized = sanitize_query(query)
     if cli_compatible:
@@ -649,7 +722,7 @@ def tool_search(
                             repeat_unknown_warning=True,
                         )
                     except (EmbedderIdentityMismatchError, DimensionMismatchError) as exc:
-                        return {"error": "Embedder identity mismatch", "details": str(exc)}
+                        return _model_mismatch_error(exc)
                 _, output = _capture_fd_stdout(
                     lambda: cli_search(
                         query=query,
@@ -670,10 +743,13 @@ def tool_search(
         return result
 
     # Backwards compat: convert old similarity scale (higher=stricter) to
-    # distance scale (lower=stricter). Similarity 0.8 → distance 0.2.
-    dist = (1.0 - min_similarity) if min_similarity is not None else max_distance
-    if dist is None:
-        dist = 1.5
+    # distance scale (lower=stricter). Similarity 0.8 → distance 0.2, and
+    # 1.0 or more means exact matches only, not "no cutoff".
+    # No cutoff unless the caller asks for one.
+    if min_similarity is not None:
+        dist = max(1.0 - min_similarity, _EXACT_MATCH_DISTANCE)
+    else:
+        dist = max_distance
 
     # Ensure the vector-disabled probe has been run via the safe
     # sqlite/pickle path before we touch chromadb. Calling _get_client()
@@ -693,6 +769,7 @@ def tool_search(
         vector_disabled=_vector_disabled,
         candidate_strategy=candidate_strategy,
         collection_name=_config.collection_name,
+        **experimental,
     )
     if _is_transient_index_error(result):
         # Post-bulk-write HNSW flush window (#1315): drop caches, give
@@ -714,6 +791,7 @@ def tool_search(
             vector_disabled=_vector_disabled,
             candidate_strategy=candidate_strategy,
             collection_name=_config.collection_name,
+            **experimental,
         )
         if not _is_transient_index_error(result):
             result["index_recovered"] = True
@@ -721,14 +799,10 @@ def tool_search(
         result["vector_disabled"] = True
         result["vector_disabled_reason"] = _vector_disabled_reason
     # Attach sanitizer metadata for transparency
-    if sanitized["was_sanitized"]:
+    report = sanitizer_report(sanitized)
+    if report:
         result["query_sanitized"] = True
-        result["sanitizer"] = {
-            "method": sanitized["method"],
-            "original_length": sanitized["original_length"],
-            "clean_length": sanitized["clean_length"],
-            "clean_query": sanitized["clean_query"],
-        }
+        result["sanitizer"] = report
     if context:
         result["context_received"] = True
     return result
@@ -784,7 +858,10 @@ def tool_check_duplicate(content: str, threshold: float = 0.9):
             "is_duplicate": len(duplicates) > 0,
             "matches": duplicates,
         }
-    except Exception:
+    except Exception as e:
+        refused = _model_mismatch_error(e)
+        if refused is not None:
+            return refused
         logger.exception("check_duplicate failed")
         return {"error": "Duplicate check failed"}
 
@@ -805,7 +882,10 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
         if not col:
             return _collection_error_or_no_palace()
         return traverse(start_room, col=col, max_hops=max_hops)
-    return traverse(start_room, max_hops=max_hops, config=_config)
+    try:
+        return traverse(start_room, max_hops=max_hops, config=_config)
+    except GraphUnavailable as e:
+        return {"error": str(e)}
 
 
 def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
@@ -820,7 +900,10 @@ def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
         if not col:
             return _collection_error_or_no_palace()
         return find_tunnels(wing_a, wing_b, col=col)
-    return find_tunnels(wing_a, wing_b, config=_config)
+    try:
+        return find_tunnels(wing_a, wing_b, config=_config)
+    except GraphUnavailable as e:
+        return {"error": str(e)}
 
 
 def tool_graph_stats():
@@ -879,7 +962,7 @@ def tool_create_tunnel(
             source_drawer_id=source_drawer_id,
             target_drawer_id=target_drawer_id,
         )
-    except ValueError as e:
+    except (ValueError, GraphUnavailable) as e:
         return {"error": str(e)}
 
 
@@ -940,7 +1023,8 @@ def tool_follow_tunnels(wing: str, room: str, record: bool = True):
     recorded (``access_count`` / ``strength``). Internal callers that only
     decorate another result, such as the light server's search enrichment,
     pass ``record=False``: a search hit is not a crossing. A read-only
-    server or a peer without the writer lock never writes the tunnel file.
+    server never writes the tunnel file. Recording needs no writer lease:
+    it takes the tunnel file's own lock and never touches the vector store.
     """
     try:
         wing = sanitize_name(wing, "wing")
@@ -950,6 +1034,4 @@ def tool_follow_tunnels(wing: str, room: str, record: bool = True):
     col = _get_collection()
     if not col:
         return _collection_error_or_no_palace()
-    return follow_tunnels(
-        wing, room, col=col, record=record and not (_READ_ONLY or _MCP_WRITER_READ_ONLY)
-    )
+    return follow_tunnels(wing, room, col=col, record=bool(record) and not _READ_ONLY)

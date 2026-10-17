@@ -15,7 +15,6 @@ from mempalace.write_routing import (
     resolve_write_routing_policy,
 )
 
-
 _ROUTING_ENV_KEYS = (
     "MEMPALACE_WRITE_ROUTING",
     "MEMPALACE_HOOK_WRITE_ROUTING",

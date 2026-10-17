@@ -32,15 +32,15 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import re
-import os
 import functools
-from pathlib import Path
+import json
+import os
+import re
 from collections import defaultdict
+from pathlib import Path
 
 from mempalace.i18n import get_entity_patterns
-
+from mempalace.project_config import MEMPALACE_PROJECT_FILES
 
 # ==================== COCA CONTENT-WORD FILTER (Tier 2 linguistics cleanup) ====================
 #
@@ -235,6 +235,10 @@ READABLE_EXTENSIONS = {
     ".rb",
     ".go",
     ".rs",
+    # Mirrors miner.READABLE_EXTENSIONS: Business Central AL (#278) and
+    # PowerShell, so an AL-only repo still has files to sample.
+    ".al",
+    ".ps1",
 }
 
 SKIP_DIRS = {
@@ -879,7 +883,9 @@ def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
     """
     Collect prose file paths for entity detection.
     Prose only (.txt, .md, .rst, .csv) — code files produce too many false positives.
-    Falls back to all readable files if no prose found.
+    Falls back to all readable files if no prose found. MemPalace's own
+    project files are never sampled, so a re-run of ``mempalace init`` does
+    not read back the rooms and entities the first run wrote.
     """
     project_path = Path(project_dir).expanduser().resolve()
     prose_files = []
@@ -889,7 +895,7 @@ def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for filename in filenames:
             filepath = Path(root) / filename
-            if filepath.stem.lower() in SKIP_FILENAMES:
+            if filepath.stem.lower() in SKIP_FILENAMES or filename in MEMPALACE_PROJECT_FILES:
                 continue
             ext = filepath.suffix.lower()
             if ext in PROSE_EXTENSIONS:

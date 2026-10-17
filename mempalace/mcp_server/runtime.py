@@ -56,12 +56,13 @@ def _hub_proxy_target():
         return None
     try:
         from .. import server_registry
+        from ..hub_client import hub_request_headers
 
         info = server_registry.read_live_serverinfo(_config.palace_path)
         if not info or info.get("pid") == os.getpid():
             return None
         base_url = server_registry.client_base_url(info)
-        headers = {"Content-Type": "application/json"}
+        headers = hub_request_headers()
     except Exception:
         logger.debug("hub discovery failed; serving locally", exc_info=True)
         return None
@@ -79,7 +80,7 @@ def _forward_request_to_hub(base_url: str, headers: dict, request: dict, palace_
     """POST one JSON-RPC request to the hub; None for notifications (202)."""
     from .. import server_registry
 
-    body = json.dumps(request, ensure_ascii=False).encode("utf-8")
+    body = dumps_internal(request).encode("utf-8")
     with server_registry.urlopen_with_server_tokens(
         palace_path,
         f"{base_url}/mcp",
@@ -162,6 +163,34 @@ def _dispatch_stdio_request(request: dict):
         }
 
 
+def _stdio_reply(line: str, dispatch) -> Optional[str]:
+    """The JSON-RPC text owed for one stdio line, or None when none is owed.
+
+    Shared by this server and the light server's stdio loop.
+    """
+    try:
+        request = json.loads(line)
+    except Exception as exc:
+        # ValueError (digit limit) and RecursionError (nesting) are still
+        # parse failures, so answer -32700 with a null id the way the HTTP
+        # transport does. The type is in the log because MemoryError has
+        # no message of its own.
+        logger.error("Server error: %s: %s", type(exc).__name__, exc)
+        return dumps_client(_json_rpc_parse_error())
+    try:
+        response = dispatch(request)
+    except Exception:
+        # Log with the traceback: the client only gets a generic -32603, so
+        # the stack is the only record of what failed.
+        logger.exception("Server error")
+        req_id = request.get("id") if isinstance(request, dict) else None
+        if req_id is None:
+            # A notification is owed no response, failure included.
+            return None
+        return dumps_client(_json_rpc_internal_error(req_id))
+    return None if response is None else dumps_client(response)
+
+
 def _run_stdio_loop() -> None:
     _restore_stdout()
 
@@ -225,35 +254,10 @@ def _run_stdio_loop() -> None:
         if not line:
             continue
 
-        payload = None
         try:
-            request = json.loads(line)
+            payload = _stdio_reply(line, _dispatch_stdio_request)
         except KeyboardInterrupt:
             break
-        except Exception as exc:
-            # ValueError (digit limit) and RecursionError (nesting) are still
-            # parse failures, so answer -32700 with a null id the way the HTTP
-            # transport does. The type is in the log because MemoryError has
-            # no message of its own.
-            logger.error("Server error: %s: %s", type(exc).__name__, exc)
-            payload = json.dumps(_json_rpc_parse_error(), ensure_ascii=False)
-        else:
-            try:
-                response = _dispatch_stdio_request(request)
-                if response is not None:
-                    payload = json.dumps(response, ensure_ascii=False)
-            except KeyboardInterrupt:
-                break
-            except Exception:
-                # Log with the traceback: the client only gets a generic
-                # -32603, so the stack is the only record of what failed.
-                logger.exception("Server error")
-                req_id = request.get("id") if isinstance(request, dict) else None
-                if req_id is None:
-                    # A notification is owed no response, failure included.
-                    continue
-                payload = json.dumps(_json_rpc_internal_error(req_id), ensure_ascii=False)
-
         if payload is None:
             continue
         try:

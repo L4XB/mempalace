@@ -36,6 +36,17 @@ class _RWLock:
             if self._handoff:
                 self._cond.notify_all()
 
+    def try_acquire_read(self) -> bool:
+        """Take the read side only if that needs no wait."""
+        with self._cond:
+            if self._writer or (self._waiting_writers and not self._handoff):
+                return False
+            self._readers += 1
+            return True
+
+    def owns_write(self) -> bool:
+        return self._writer and self._writer_ident == threading.get_ident()
+
     def release_read(self) -> None:
         with self._cond:
             self._readers -= 1
@@ -59,20 +70,22 @@ class _RWLock:
             self._writer_ident = None
             self._cond.notify_all()
 
-    def yield_write(self) -> None:
+    def yield_write(self) -> bool:
         """Let the requests queued behind a held write lock run, then take it back.
 
         For a writer that works in steps, a mine between files. Plain writer
         preference would keep queued readers out while this writer asks for
         the lock again, so they are let in first; a queued writer takes its
-        turn as usual. Returns at once when nobody waits, or when the calling
-        thread is not the one holding the write lock.
+        turn as usual. Returns False at once when nobody waits, or when the
+        calling thread is not the one holding the write lock; True when other
+        requests ran, so the caller knows backend handles it holds may have
+        been closed under it.
         """
         with self._cond:
             if not self._writer or self._writer_ident != threading.get_ident():
-                return
+                return False
             if not self._waiting_readers and not self._waiting_writers:
-                return
+                return False
             self._writer = False
             self._writer_ident = None
             self._handoff = True
@@ -93,6 +106,7 @@ class _RWLock:
                 self._writer_ident = threading.get_ident()
             finally:
                 self._waiting_writers -= 1
+            return True
 
     def read_lock(self):
         lock = self
@@ -120,21 +134,19 @@ class _RWLock:
 _HTTP_REQUEST_LOCK = _RWLock()
 # Taken before _HTTP_REQUEST_LOCK by a hub mine, so a second mine waits for the
 # first as before even though the first yields the request lock between files.
+# mempalace_reconnect takes it too (see _http_dispatch): a mine keeps the
+# collection handles it opened across every yield, and reconnect closes them.
 _HTTP_MINE_LOCK = threading.Lock()
-# Tools that hold the request lock exclusively for a long run but reach
-# mine_yield_point() between files, where waiting requests may run.
-_HTTP_YIELDING_TOOLS = frozenset({"mempalace_mine"})
-# Tools whose handler makes one request-local embedding call before an
-# otherwise independent backend operation. Holding ``_HTTP_REQUEST_LOCK``
-# through that inference stalls unrelated requests for the whole model call.
-# Compound read-modify-write tools stay fully serialized.
-_HTTP_EMBEDDING_RELEASE_TOOLS = frozenset(
-    {
-        "mempalace_search",
-        "mempalace_check_duplicate",
-        "mempalace_diary_write",
-    }
-)
+# How long mempalace_reconnect waits for a running hub mine before refusing.
+# Long enough to absorb a mine that is wrapping up; a mine can run for hours,
+# and holding an MCP request open that long would time the client out with
+# no explanation.
+_HTTP_RECONNECT_MINE_WAIT_S = 10.0
+# Lock-free, yielding, and embedding-release tools: see the flags in
+# mempalace.tool_capabilities.
+_HTTP_LOCK_FREE_TOOLS = _tool_capabilities.HTTP_LOCK_FREE_TOOLS
+_HTTP_YIELDING_TOOLS = _tool_capabilities.HTTP_YIELDING_TOOLS
+_HTTP_EMBEDDING_RELEASE_TOOLS = _tool_capabilities.HTTP_EMBEDDING_RELEASE_TOOLS
 # Reserved before a request releases the request lock mid-embedding so
 # ``mempalace_reconnect`` cannot close backend handles during that window.
 # Reconnect acquires this before the request lock; embedding reacquires the
@@ -146,34 +158,6 @@ _HTTP_MAX_REQUEST_BYTES = 16 * 1024 * 1024
 _HTTP_ACTIVE_CLIENT_WINDOW_S = 120.0
 
 _HTTP_PROTOCOL_METHODS = frozenset({"initialize", "ping", "tools/list"})
-
-# RFC 003 phase 5: logstream tools touch only logstream.sqlite3 (its own WAL
-# database with internal locking) — never Chroma or the KG. Dispatching them
-# outside _HTTP_REQUEST_LOCK keeps a five-minute mempalace_event_wait
-# long-poll from stalling every other agent on a shared hub, and lets the
-# SSE stream coexist with normal tool traffic.
-# Knowledge-graph tools use their own SQLite database and lock. Mesh peers
-# and the AAAK spec are process-local reads.
-_HTTP_LOCK_FREE_TOOLS = frozenset(
-    {
-        "mempalace_event_append",
-        "mempalace_task_create",
-        "mempalace_event_list",
-        "mempalace_event_wait",
-        "mempalace_event_ack",
-        "mempalace_artifact_put",
-        "mempalace_artifact_get",
-        "mempalace_patch_submit",
-        "mempalace_kg_query",
-        "mempalace_kg_add",
-        "mempalace_kg_invalidate",
-        "mempalace_kg_supersede",
-        "mempalace_kg_timeline",
-        "mempalace_kg_stats",
-        "mempalace_mesh_peers",
-        "mempalace_get_aaak_spec",
-    }
-)
 
 # SSE stream limits (GET /logstream/stream). Each connected client holds one
 # handler thread, so the cap is a thread-exhaustion guard, not a rate limit.
@@ -278,6 +262,39 @@ def _http_origin_allowed(origin: str) -> bool:
     except Exception:
         return False
     return host in ("127.0.0.1", "localhost", "::1")
+
+
+def _http_same_origins(scheme: str, port: int) -> set:
+    """The exact origins of a loopback server's own pages, one per host spelling."""
+    hosts = ("127.0.0.1", "localhost", "[::1]")
+    return {f"{scheme}://{host}:{port}" for host in hosts}
+
+
+# Headers a local proxy (tailscale serve, nginx, cloudflared) commonly adds when
+# it relays traffic from elsewhere. Best effort only: a proxy that adds none, or
+# a TCP forwarder, still makes the hub public, which is why forwarding one
+# needs a token.
+_HTTP_PROXY_HEADERS = (
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "x-forwarded-server",
+    "x-original-host",
+    "x-real-ip",
+    "x-client-ip",
+    "cf-connecting-ip",
+    "true-client-ip",
+    "forwarded",
+    "via",
+)
+
+
+def _http_proxied(headers) -> bool:
+    for name in headers.keys():
+        lowered = name.lower()
+        if lowered in _HTTP_PROXY_HEADERS or lowered.startswith("tailscale-"):
+            return True
+    return False
 
 
 def _http_client_identity(handler) -> tuple[str, dict]:
@@ -410,7 +427,24 @@ def _http_request_rejected(handler, require_auth: bool) -> bool:
             handler.send_error(403, "Forbidden")
             return True
     origin = handler.headers.get("Origin")
-    if origin and not _http_origin_allowed(origin):
+    if getattr(srv, "local_only_tokenless", False):
+        if _http_proxied(handler.headers):
+            logger.warning("HTTP request rejected: proxied request to a hub without a token")
+            handler.send_error(
+                403, "Forbidden", "Proxied access needs a token: set MEMPALACE_MCP_HTTP_TOKEN"
+            )
+            return True
+        # Browsers label every request; a cross-site <img> or <script> sends no
+        # Origin but does send this, so it can't hold a stream slot.
+        fetch_site = (handler.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if fetch_site not in ("", "same-origin", "none"):
+            logger.warning("HTTP request rejected: Sec-Fetch-Site %r", fetch_site)
+            handler.send_error(403, "Forbidden")
+            return True
+        allowed = origin is None or origin.strip().lower().rstrip("/") in srv.same_origins
+    else:
+        allowed = not origin or _http_origin_allowed(origin)
+    if not allowed:
         logger.warning("HTTP request rejected: cross-origin %r", origin)
         handler.send_error(403, "Forbidden")
         return True
@@ -531,6 +565,30 @@ def _http_embedding_release_installed(mode: str):
         set_embedding_section_hook(None)
 
 
+def _http_reconnect_refused_during_mine(request):
+    """Tool result for a reconnect that found a hub mine still running."""
+    req_id = request.get("id")
+    if req_id is None:
+        return None
+    payload = {
+        "success": False,
+        "error": (
+            "a mine is running on this hub; reconnect closes the backend handles "
+            f"that mine is writing through, so it was not run (waited "
+            f"{_HTTP_RECONNECT_MINE_WAIT_S:g}s)"
+        ),
+        "error_class": "MineInProgress",
+        "hint": "Retry mempalace_reconnect after the mine finishes.",
+    }
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {
+            "content": [{"type": "text", "text": json.dumps(payload, indent=2, ensure_ascii=False)}]
+        },
+    }
+
+
 def _http_dispatch(request):
     """Dispatch one JSON-RPC request with the transport's locking policy.
 
@@ -547,13 +605,11 @@ def _http_dispatch(request):
     tool_name = None
     if method == "tools/call" and isinstance(request.get("params"), dict):
         tool_name = request["params"].get("name")
+    if not isinstance(tool_name, str):
+        return handle_request(request)
     if tool_name in _HTTP_LOCK_FREE_TOOLS:
         return handle_request(request)
-    # service.classify_tool is the authoritative read/write registry. The
-    # lock-free set above is a storage-boundary override for independent DBs.
-    from ..service import classify_tool
-
-    if classify_tool(tool_name) == "read":
+    if _tool_capabilities.classify_tool(tool_name) == "read":
         release_mode = _embedding_release_mode(tool_name, request, "read")
         if release_mode:
             with _http_embedding_release_installed(release_mode), _HTTP_REQUEST_LOCK.read_lock():
@@ -573,11 +629,24 @@ def _http_dispatch(request):
         ):
             return handle_request(request)
     if tool_name == "mempalace_reconnect":
+        # A mine hands the request lock to queued requests between files but
+        # keeps the collection handles it opened at the start. Reconnect closes
+        # every backend handle, so letting it into that handoff left the mine
+        # writing through closed handles for the rest of its files. Take the
+        # mine lock first. Lock order is mine -> lifecycle -> request, the mine
+        # path's mine -> request with lifecycle between; nothing that holds
+        # lifecycle or the request lock ever waits for the mine lock.
+        #
         # Lifecycle before the request lease. An in-flight embed holds the
         # lifecycle lock across the window where it does not hold the lease,
         # and takes the lease back before releasing lifecycle.
-        with _http_embedding_lifecycle(), _HTTP_REQUEST_LOCK:
-            return handle_request(request)
+        if not _HTTP_MINE_LOCK.acquire(timeout=_HTTP_RECONNECT_MINE_WAIT_S):
+            return _http_reconnect_refused_during_mine(request)
+        try:
+            with _http_embedding_lifecycle(), _HTTP_REQUEST_LOCK:
+                return handle_request(request)
+        finally:
+            _HTTP_MINE_LOCK.release()
     release_mode = _embedding_release_mode(tool_name, request, "write")
     if release_mode:
         with _http_embedding_release_installed(release_mode), _HTTP_REQUEST_LOCK:
@@ -632,9 +701,14 @@ def _http_serve_sync(handler, path: str) -> bool:
     from urllib.parse import parse_qsl
 
     query = dict(parse_qsl(urlparse(handler.path).query))
+
+    def send(status: int, payload: dict) -> None:
+        # Peers replicate what they read here, so stray bytes travel exact.
+        handler._send_json(status, payload, exact=True)
+
     try:
         if path == "/sync/version_vector":
-            handler._send_json(
+            send(
                 200,
                 {
                     "replica_id": _call_logstream(lambda ls: ls.replica_id),
@@ -653,21 +727,21 @@ def _http_serve_sync(handler, path: str) -> bool:
             after = int(query.get("after", "0") or 0)
             limit = int(query.get("limit", "500") or 500)
             events = _call_logstream(lambda ls: ls.list_ops(origin, after_seq=after, limit=limit))
-            handler._send_json(200, {"origin": origin, "events": events, "count": len(events)})
+            send(200, {"origin": origin, "events": events, "count": len(events)})
             return True
         if path == "/sync/artifact":
             artifact_id = query.get("id") or ""
             artifact = _call_logstream(lambda ls: ls.get_artifact(artifact_id))
             if artifact is None:
-                handler._send_json(404, {"error": f"artifact {artifact_id!r} not found"})
+                send(404, {"error": f"artifact {artifact_id!r} not found"})
             else:
-                handler._send_json(200, {"artifact": artifact})
+                send(200, {"artifact": artifact})
             return True
         if path == "/sync/peers":
-            handler._send_json(200, _mesh_peers_payload())
+            send(200, _mesh_peers_payload())
             return True
     except (ValueError, TypeError) as exc:
-        handler._send_json(400, {"error": str(exc)})
+        send(400, {"error": str(exc)})
         return True
     return False
 
@@ -676,6 +750,7 @@ def _http_serve_sync(handler, path: str) -> bool:
 # Written by the sync loop after every round, read by /sync/peers. Values
 # are whole-entry replacements under the GIL, so readers never see a
 # half-updated peer record.
+_MESH_STATE_LOCK = threading.RLock()
 _PEER_SYNC_STATE: dict = {}
 
 # Node profiles learned from peers (their self-descriptions, relayed
@@ -692,6 +767,31 @@ _node_profile_cache: dict = {}
 _ACCELERATOR_NAMES = {"cuda": "CUDA", "dml": "DirectML", "coreml": "CoreML", "cpu": "CPU"}
 
 
+_last_profile_drawer_count = None
+
+
+def _drawer_count_for_profile():
+    """Drawer count for the node profile.
+
+    ``_get_collection`` writes the process-wide collection cache, so the count
+    needs the request lock's read side. Lock-free routes (/sync/version_vector,
+    mempalace_mesh_peers) call this and must not queue behind a write, so when
+    the read side is not free at once they get the last count taken.
+    """
+    global _last_profile_drawer_count
+    lock = _HTTP_REQUEST_LOCK
+    owned = lock.owns_write()
+    if not owned and not lock.try_acquire_read():
+        return _last_profile_drawer_count
+    try:
+        col = _get_collection(create=False)
+        _last_profile_drawer_count = None if col is None else col.count()
+    finally:
+        if not owned:
+            lock.release_read()
+    return _last_profile_drawer_count
+
+
 def _node_profile() -> dict:
     """This node's self-described profile — every field is pure derivation
     (palace presence, logstream authorship, resolved onnxruntime provider),
@@ -705,9 +805,8 @@ def _node_profile() -> dict:
     roles = []
     drawers = None
     try:
-        col = _get_collection(create=False)
-        if col is not None:
-            drawers = col.count()
+        drawers = _drawer_count_for_profile()
+        if drawers is not None:
             roles.append("replica")
     except Exception:
         logger.debug("node profile: drawer count unavailable", exc_info=True)
@@ -747,13 +846,14 @@ def _merge_known_profiles(profiles: dict) -> None:
     """Fold relayed profiles in, last-writer-wins by advertised_at."""
     if not isinstance(profiles, dict):
         return
-    for origin, profile in profiles.items():
-        if not isinstance(origin, str) or not isinstance(profile, dict):
-            continue
-        prior = _KNOWN_PROFILES.get(origin)
-        if prior and (prior.get("advertised_at") or "") >= (profile.get("advertised_at") or ""):
-            continue
-        _KNOWN_PROFILES[origin] = profile
+    with _MESH_STATE_LOCK:
+        for origin, profile in profiles.items():
+            if not isinstance(origin, str) or not isinstance(profile, dict):
+                continue
+            prior = _KNOWN_PROFILES.get(origin)
+            if prior and (prior.get("advertised_at") or "") >= (profile.get("advertised_at") or ""):
+                continue
+            _KNOWN_PROFILES[origin] = profile
 
 
 def _known_profiles_snapshot(published: dict = None) -> dict:
@@ -765,8 +865,10 @@ def _known_profiles_snapshot(published: dict = None) -> dict:
     """
     if published is None:
         published = _published_mesh_state()
+    with _MESH_STATE_LOCK:
+        learned = dict(_KNOWN_PROFILES)
     snapshot = dict(published.get("profiles") or {})
-    snapshot.update(_KNOWN_PROFILES)
+    snapshot.update(learned)
     try:
         snapshot[_call_logstream(lambda ls: ls.replica_id)] = _node_profile()
     except Exception:
@@ -787,10 +889,13 @@ def _publish_mesh_state(palace_path: str) -> None:
     from .. import server_registry
 
     try:
+        with _MESH_STATE_LOCK:
+            peers = dict(_PEER_SYNC_STATE)
+            profiles = dict(_KNOWN_PROFILES)
         server_registry.write_mesh_state(
             palace_path,
-            peers=dict(_PEER_SYNC_STATE),
-            profiles=dict(_KNOWN_PROFILES),
+            peers=peers,
+            profiles=profiles,
         )
     except Exception:
         logger.debug("mesh state publish failed", exc_info=True)
@@ -814,6 +919,11 @@ def _record_peer_sync(stats: dict) -> None:
     """Fold one peer's round outcome into the estate state."""
     name = stats.get("peer_name") or stats.get("peer_url") or "?"
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with _MESH_STATE_LOCK:
+        _record_peer_sync_locked(stats, name, now)
+
+
+def _record_peer_sync_locked(stats: dict, name: str, now: str) -> None:
     prior = _PEER_SYNC_STATE.get(name) or {}
     if stats.get("error"):
         entry = {
@@ -870,11 +980,14 @@ def _mesh_peers_payload() -> dict:
     # back to the published estate per peer.
     published = _published_mesh_state()
     published_peers = published.get("peers") or {}
+    with _MESH_STATE_LOCK:
+        local_peers = {key: dict(value) for key, value in _PEER_SYNC_STATE.items()}
+        in_process = bool(local_peers)
     named_origins = {replica_id}
     peers = []
     for peer in configured:
         name = peer.get("name") or peer["url"]
-        state = dict(_PEER_SYNC_STATE.get(name) or published_peers.get(name) or {})
+        state = dict(local_peers.get(name) or published_peers.get(name) or {})
         state.pop("url", None)  # peers.json is authoritative for the url
         if state.get("replica_id"):
             named_origins.add(state["replica_id"])
@@ -899,7 +1012,7 @@ def _mesh_peers_payload() -> dict:
         # the hub at published_at, and writer_alive says whether that hub is
         # still running (a dead hub leaves a last-known-good reading).
         "estate_source": {
-            "in_process": bool(_PEER_SYNC_STATE),
+            "in_process": in_process,
             "published_at": published.get("written_at"),
             "writer_alive": published.get("writer_alive", False),
         },
@@ -1111,11 +1224,7 @@ def _http_serve_logstream_stream(handler) -> None:
                 else _call_logstream(lambda ls: ls.list_events(limit=_SSE_BATCH_LIMIT, **filters))
             )
             for event in events:
-                frame = (
-                    f"id: {event['id']}\n"
-                    f"event: logstream\n"
-                    f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                )
+                frame = f"id: {event['id']}\nevent: logstream\ndata: {dumps_internal(event)}\n\n"
                 handler.wfile.write(frame.encode("utf-8"))
                 cursor = event["id"]
                 last_write = time.monotonic()
@@ -1133,6 +1242,38 @@ def _http_serve_logstream_stream(handler) -> None:
         handler.close_connection = True
 
 
+def _http_local_only(host: str) -> bool:
+    """A loopback bind that no fronting proxy publishes to other machines.
+
+    ``MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS`` names the public host a proxy such as
+    ``tailscale serve`` forwards under, so such a hub is treated as remote.
+    """
+    return _http_is_loopback(host) and not os.environ.get(_HTTP_EXTRA_ALLOWED_HOSTS_ENV, "").strip()
+
+
+def _http_resolve_token(host: str) -> str:
+    """The bearer token /mcp requires, or "" when serving without one.
+
+    A local-only loopback bind needs no token unless ``MEMPALACE_MCP_HTTP_TOKEN``
+    sets one; the Host pin and Origin check guard it against browsers. Any other
+    bind reuses or mints the palace's stored token, which local clients read
+    from the same place, unless ``MEMPALACE_MCP_HTTP_ALLOW_INSECURE_NO_TOKEN``
+    (``mempalace serve --allow-insecure``) says a trusted proxy guards it.
+    """
+    token = os.environ.get("MEMPALACE_MCP_HTTP_TOKEN", "").strip()
+    if token or _http_local_only(host) or _truthy_env(_HTTP_ALLOW_INSECURE_NO_TOKEN_ENV):
+        return token
+    if not _config.palace_path:
+        raise ValueError(
+            "MCP HTTP needs a bearer token: set MEMPALACE_MCP_HTTP_TOKEN or a palace "
+            f"path, or set {_HTTP_ALLOW_INSECURE_NO_TOKEN_ENV}=1 to serve without one."
+        )
+    from .. import server_registry
+
+    token, _created = server_registry.load_or_create_server_token(_config.palace_path)
+    return token
+
+
 def _build_http_server(host: str, port: int):
     """Construct (but do not start) the MCP HTTP server.
 
@@ -1144,17 +1285,7 @@ def _build_http_server(host: str, port: int):
     """
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    auth_token = os.environ.get("MEMPALACE_MCP_HTTP_TOKEN", "").strip()
-    if (
-        not _http_is_loopback(host)
-        and not auth_token
-        and not _truthy_env(_HTTP_ALLOW_INSECURE_NO_TOKEN_ENV)
-    ):
-        raise ValueError(
-            "MEMPALACE_MCP_HTTP_TOKEN is required when binding MCP HTTP to a "
-            f"non-loopback host. Set {_HTTP_ALLOW_INSECURE_NO_TOKEN_ENV}=1 only "
-            "when a trusted fronting layer provides access control."
-        )
+    auth_token = _http_resolve_token(host)
 
     # Resolve TLS before bind so a bad cert/key fails loudly rather than at the
     # first request. TLS is transport encryption only — the bearer-token guard
@@ -1214,8 +1345,11 @@ def _build_http_server(host: str, port: int):
             self.wfile.write(body)
             self.close_connection = True
 
-        def _send_json(self, status: int, payload: dict) -> None:
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        def _send_json(self, status: int, payload: dict, *, exact: bool = False) -> None:
+            # MCP clients get stray source bytes as U+FFFD; peers replicating
+            # through /sync get them exact.
+            dumps = dumps_internal if exact else dumps_client
+            body = dumps(payload).encode("utf-8")
             self._send_bytes(status, body, "application/json; charset=utf-8")
 
         def _request_rejected(self, require_auth: bool) -> bool:
@@ -1230,6 +1364,12 @@ def _build_http_server(host: str, port: int):
             path = urlparse(self.path).path
             if path != "/mcp":
                 self.send_error(404, "Not Found")
+                return
+            # A browser can send text/plain cross-origin without a CORS preflight;
+            # it cannot send application/json, so only JSON reaches the dispatcher.
+            media_type = (self.headers.get("Content-Type") or "").split(";", 1)[0]
+            if media_type.strip().lower() != "application/json":
+                self.send_error(415, "Unsupported Media Type", "POST /mcp needs application/json")
                 return
 
             try:
@@ -1292,7 +1432,9 @@ def _build_http_server(host: str, port: int):
                 self.close_connection = True
                 return
 
-            self._send_json(200, response)
+            # Another MemPalace process (proxy, hub client) asks for the exact
+            # text; it shows the result to its own client the client's way.
+            self._send_json(200, response, exact=self.headers.get(EXACT_WIRE_HEADER) == "1")
 
     httpd = _MCPHTTPServer((host, port), _Handler)
     bound_port = httpd.server_address[1]
@@ -1317,6 +1459,8 @@ def _build_http_server(host: str, port: int):
     if tls_cert:
         httpd.socket = _wrap_tls(httpd.socket, tls_cert, tls_key)
         httpd.scheme = "https"
+    httpd.local_only_tokenless = not auth_token and _http_local_only(host)
+    httpd.same_origins = _http_same_origins(httpd.scheme, bound_port)
     return httpd
 
 
@@ -1352,7 +1496,11 @@ def _serve_http(host: str, port: int) -> None:
                 port=bound_port,
                 scheme=getattr(httpd, "scheme", "http"),
                 read_only=_READ_ONLY,
-                capabilities=["mine_include_ignored", "search_cli_compatible"],
+                capabilities=[
+                    "mine_include_ignored",
+                    "mine_include_subagents",
+                    "search_cli_compatible",
+                ],
                 search_config_fingerprint=_config.search_config_fingerprint,
             )
             import atexit

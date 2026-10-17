@@ -6,8 +6,8 @@ import sqlite3
 
 import chromadb
 import pytest
-
 from _mcp_server_helpers import _patch_mcp_server
+
 from mempalace.backends import _inproc_sqlite
 
 

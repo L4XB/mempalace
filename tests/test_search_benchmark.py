@@ -1,7 +1,7 @@
 """Tests for the local, text-free private Palace benchmark."""
 
-import json
 import importlib.util
+import json
 import os
 import stat
 import sys

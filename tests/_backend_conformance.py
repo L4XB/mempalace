@@ -59,3 +59,38 @@ def assert_partition_isolation(backend, writer, other, *, embedding=None):
     other.delete(ids=[_PROBE_ID])
     survivor = writer.get(ids=[_PROBE_ID])
     assert survivor.ids == [_PROBE_ID], "delete() crossed the isolation boundary"
+
+
+def assert_update_skips_missing_ids(backend, col, *, embedding=None):
+    """Assert ``update`` skips ids that do not exist and applies the rest.
+
+    An update MUST NOT create a record for a missing id, MUST NOT fail the
+    batch because one id is missing, and MUST still change the ids that exist,
+    for metadata-only and document updates alike.
+    """
+    explicit = "requires_explicit_embeddings" in backend.capabilities
+    vector = list(embedding if embedding is not None else _PROBE_EMBEDDING)
+
+    add_kwargs = {
+        "ids": ["present"],
+        "documents": ["the record that exists"],
+        "metadatas": [{"wing": "conformance"}],
+    }
+    if explicit:
+        add_kwargs["embeddings"] = [vector]
+    col.add(**add_kwargs)
+    baseline = col.count()
+
+    col.update(ids=["ghost-a", "present"], metadatas=[{"room": "x"}, {"room": "moved"}])
+    doc_kwargs = {"ids": ["present", "ghost-b"], "documents": ["rewritten", "phantom"]}
+    if explicit:
+        doc_kwargs["embeddings"] = [vector, vector]
+    col.update(**doc_kwargs)
+
+    assert col.count() == baseline, "update() created records for missing ids"
+    assert col.get(ids=["ghost-a", "ghost-b"]).ids == [], "update() created a missing id"
+    got = col.get(ids=["present"], include=["documents", "metadatas"])
+    assert got.ids == ["present"]
+    assert got.documents == ["rewritten"], "update() skipped an id that exists"
+    assert got.metadatas[0].get("room") == "moved"
+    assert got.metadatas[0].get("wing") == "conformance", "update() dropped existing metadata"

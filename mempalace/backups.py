@@ -21,7 +21,6 @@ import os
 import shutil
 import stat
 
-
 # Names for the file types a backup copy deliberately leaves behind. A socket
 # or a named pipe makes ``shutil.copytree`` record an error for that entry and
 # raise at the end. Device nodes do not, but dereferencing one copies the

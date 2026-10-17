@@ -1,7 +1,7 @@
 """Tests for mempalace.rooms — closed room sets: propose (LLM) and apply (embedding decider)."""
 
-import os
 import json
+import os
 from argparse import Namespace
 
 import pytest

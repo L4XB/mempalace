@@ -65,11 +65,11 @@ sys.stdout = sys.stderr
 
 import argparse  # noqa: E402  (deferred until after stdio protection above)
 import contextlib  # noqa: E402
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import re  # noqa: E402
-import hashlib  # noqa: E402
-import hmac  # noqa: E402
 import sqlite3  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -78,22 +78,20 @@ from pathlib import Path  # noqa: E402
 from typing import Optional  # noqa: E402
 from urllib.parse import urlparse  # noqa: E402
 
-from ..config import (  # noqa: E402
-    MempalaceConfig,
-    sanitize_kg_value,
-    sanitize_name,
-    sanitize_content,
-    sanitize_iso_temporal,
-    sqlite_read_uri,
-    strip_lone_surrogates,
-)
-from ..version import __version__  # noqa: E402
 from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: E402
 
+from .. import tool_capabilities as _tool_capabilities  # noqa: E402
+from ..backends import BackendMismatchError, PalaceRef, detect_backend_for_path  # noqa: E402
+from ..backends.base import (  # noqa: E402
+    DimensionMismatchError,
+    EmbedderIdentityMismatchError,
+    EmbedderIdentityRecordError,
+    EmbeddingFunctionMismatchError,
+)
 from ..backends.chroma import (  # noqa: E402
+    _HNSW_WRITE_DEFAULTS,
     ChromaBackend,
     ChromaCollection,
-    _HNSW_WRITE_DEFAULTS,
     _clear_chroma_system_cache,
     _is_own_db_stamp,
     _note_own_db_stamp,
@@ -103,36 +101,59 @@ from ..backends.chroma import (  # noqa: E402
     register_before_system_cache_reset,
     reset_hnsw_capacity_cache,
 )
-from ..backends import BackendMismatchError, PalaceRef, detect_backend_for_path  # noqa: E402
+from ..collision_scan import assert_no_collisions  # noqa: E402
+from ..config import (  # noqa: E402
+    MempalaceConfig,
+    sanitize_content,
+    sanitize_iso_temporal,
+    sanitize_kg_value,
+    sanitize_name,
+    sqlite_read_uri,
+    strip_lone_surrogates,
+)
 from ..date_window import filed_at_in_window, parse_date_bound  # noqa: E402
-from ..query_sanitizer import sanitize_query  # noqa: E402
-from ..source_identity import identity_metadata  # noqa: E402
+from ..embedding import (  # noqa: E402
+    MODEL_ERROR_CLASS_NAMES,
+    EmbeddingFunctionUnavailableError,
+    UnknownEmbeddingModelError,
+    model_error_result,
+)
+from ..hallways import (  # noqa: E402
+    delete_hallway,
+    list_hallways,
+)
+from ..ids import ID_RECIPE, make_drawer_id_from_content  # noqa: E402
+from ..knowledge_graph import DEFAULT_KG_PATH, KnowledgeGraph  # noqa: E402
+from ..logstream import LOGSTREAM_DB_FILENAME, Logstream  # noqa: E402
+from ..metadata_types import BOOKKEEPING_WHERE, is_bookkeeping  # noqa: E402
+from ..palace_graph import (  # noqa: E402
+    GraphUnavailable,
+    _load_tunnels as _load_graph_tunnels,
+    create_tunnel,
+    delete_tunnel,
+    find_tunnels,
+    follow_tunnels,
+    graph_stats,
+    list_tunnels,
+    traverse,
+)
+from ..query_sanitizer import sanitize_query, sanitizer_report  # noqa: E402
 from ..searcher import (  # noqa: E402
     SearchError,
     _distance_to_similarity,
     _metric_for_collection,
+    build_where_filter,
     search as cli_search,
     search_memories,
 )
-from ..palace_graph import (  # noqa: E402
-    traverse,
-    find_tunnels,
-    graph_stats,
-    create_tunnel,
-    list_tunnels,
-    delete_tunnel,
-    follow_tunnels,
-    _load_tunnels as _load_graph_tunnels,
+from ..source_identity import identity_metadata  # noqa: E402
+from ..stored_text import (  # noqa: E402
+    EXACT_WIRE_HEADER,
+    decode_value,
+    dumps_client,
+    dumps_internal,
 )
-from ..hallways import (  # noqa: E402
-    list_hallways,
-    delete_hallway,
-)
-
-from ..knowledge_graph import KnowledgeGraph, DEFAULT_KG_PATH  # noqa: E402
-from ..logstream import LOGSTREAM_DB_FILENAME, Logstream  # noqa: E402
-from ..collision_scan import assert_no_collisions  # noqa: E402
-from ..ids import ID_RECIPE, make_drawer_id_from_content  # noqa: E402
+from ..version import __version__  # noqa: E402
 
 # ==================== WRITE-AHEAD LOG ====================
 # Every write operation is logged to a JSONL file before execution.

@@ -6,14 +6,13 @@ import json
 import os
 import re
 import sys
-import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from .fsio import atomic_publish
 from .version import __version__
-
 
 _POLICY_FILE = "updates.json"
 _CACHE_FILE = "updates-cache.json"
@@ -50,17 +49,13 @@ def _read_json(name: str, config_dir=None) -> dict:
 def _write_json(name: str, value: dict, config_dir=None) -> None:
     directory = _config_dir(config_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=".updates-", suffix=".json", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(value, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temporary, directory / name)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+
+    def body(handle) -> None:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    # fsio retries a rename that a reader of the cache briefly blocks on Windows.
+    atomic_publish(directory / name, body)
 
 
 def configure_updates(

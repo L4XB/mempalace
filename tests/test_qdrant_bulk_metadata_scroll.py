@@ -13,12 +13,11 @@ Covers:
   4. The Qdrant scroll page size constant is 4096, not 256.
 """
 
-import types
 import sys
+import types
 from unittest import mock
 
 import pytest
-
 
 # ── Stub heavy deps so we can import mempalace modules in isolation ─────────
 #
@@ -71,14 +70,13 @@ def _stub_heavy_deps(monkeypatch):
 # during this file's first import below and during every test.
 import numpy  # noqa: E402,F401
 
+from mempalace.backends import qdrant as qdrant_mod  # noqa: E402
 from mempalace.backends.base import (  # noqa: E402
     BaseCollection,
     GetResult,
     PalaceRef,
 )
-from mempalace.backends import qdrant as qdrant_mod  # noqa: E402
 from mempalace.backends.qdrant import QdrantCollection, _QdrantConfig  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # 1. BaseCollection default get_all_metadata()

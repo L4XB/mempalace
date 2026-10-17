@@ -22,8 +22,8 @@ from .sqlite_exact import (
     _DB_FILENAME,
     SQLiteExactBackend,
     SQLiteExactCollection,
-    _SnapshotChanged,
     _as_vector_array,
+    _SnapshotChanged,
 )
 
 logger = logging.getLogger(__name__)

@@ -28,11 +28,10 @@ def cmd_sync(args):
             auto_start=routing.decision.auto_start_daemon,
         )
         return
-    from ..palace import MineAlreadyRunning
-    from ..wal import _wal_log
     from ..backends import detect_backend_for_path
-    from ..palace import _backend_artifact_label, resolve_backend_name
+    from ..palace import MineAlreadyRunning, _backend_artifact_label, resolve_backend_name
     from ..sync import sync_palace
+    from ..wal import _wal_log
 
     if not os.path.isdir(palace_path):
         print(f"\n  No palace found at {palace_path}")

@@ -34,16 +34,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import logging
 import os
-import tempfile
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import combinations
 from typing import Optional
 
 from .dynamics import initialize_dynamics_fields
+from .fsio import (
+    atomic_write_json as _atomic_write_json,
+    read_json_for_update as _read_json_for_update,
+    refuse_unparsed as _refuse_unparsed,
+)
+from .metadata_types import is_bookkeeping
 
 logger = logging.getLogger("mempalace_hallways")
 
@@ -97,6 +102,25 @@ def _legacy_hallway_file() -> str:
     return os.path.join(os.path.expanduser("~"), ".mempalace", "hallways.json")
 
 
+def _load_hallways_for_write(config=None) -> list[dict]:
+    """Hallway records a save is allowed to replace.
+
+    Missing is an empty list. A file that does not parse, or is not the
+    hallway document, is moved aside and the save is refused. A read that
+    only lists hallways stays on :func:`_load_hallways` and does not move
+    the file.
+    """
+    path = _get_hallway_file(config)
+    loaded = _read_json_for_update(path)
+    if loaded is None:
+        return []
+    if isinstance(loaded, dict) and isinstance(loaded.get("hallways"), list):
+        return loaded["hallways"]
+    if isinstance(loaded, list):
+        return loaded
+    _refuse_unparsed(path, "is not a hallway document")
+
+
 def _load_hallways(config=None) -> list[dict]:
     """Read all hallway records. Returns ``[]`` if the file is missing or corrupt.
 
@@ -148,22 +172,7 @@ def _save_hallways(hallways: list[dict], config=None) -> None:
         "schema_version": _SCHEMA_VERSION,
         "hallways": list(hallways),
     }
-    fd, tmp_path = tempfile.mkstemp(prefix=".hallways-", suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-        try:
-            os.chmod(tmp_path, 0o600)
-        except OSError:
-            # Non-POSIX systems may not support chmod; not fatal.
-            pass
-        os.replace(tmp_path, hallway_file)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    _atomic_write_json(hallway_file, payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -533,7 +542,7 @@ def _wing_file_keys(metadatas) -> dict[str, str]:
     """
     by_base: dict[str, set[str]] = defaultdict(set)
     for meta in metadatas:
-        if not isinstance(meta, dict) or meta.get("is_sentinel"):
+        if not isinstance(meta, dict) or is_bookkeeping(meta):
             continue
         for spelling in _parse_entities(meta.get("entities")):
             by_base[entity_spelling_key(spelling)].add(spelling)
@@ -544,6 +553,89 @@ def _wing_file_keys(metadatas) -> dict[str, str]:
             for spelling in cluster:
                 mapping[spelling] = canonical
     return mapping
+
+
+# Every drawer metadata key compute_hallways_for_wing reads.
+_HALLWAY_KEYS = ("wing", "room", "entities", "is_sentinel")
+
+
+def _wing_metadata_from_sqlite(col, wing: str) -> Optional[list]:
+    """The wing's drawer metadata from Chroma's one-pass sqlite stream.
+
+    Returns ``None`` when ``col`` has no such stream or reading it failed, and
+    the caller pages instead. Paging is ``get(where={"wing": ...}, offset=N)``,
+    which Chroma runs as SQL ``OFFSET``: every page re-walks the rows before
+    it, so a large wing costs the square of its size (#2684).
+
+    The read is scoped to the wing in sqlite, and only drawers holding
+    ``entities`` are read, both through the ``(key, string_value)`` index, so
+    a small wing in a large palace reads its own rows rather than the
+    palace's. A drawer without entities neither forms a pair nor names a
+    file, so the hallways come out the same. A wing none of whose drawers
+    hold any still has to replace its old hallways with none, so a second
+    scoped read, stopped at its first row, tells it apart from a wing with no
+    drawers at all.
+    """
+    from .backends.chroma import MetadataRecoveryPending
+    from .palace import _fast_collection_metadata
+
+    scope = {"wing": wing}
+    try:
+        rows = _fast_collection_metadata(col, _HALLWAY_KEYS, require_key="entities", equals=scope)
+        if rows is None:
+            return None
+        metadatas = [m for m in rows if isinstance(m, dict) and m.get("wing") == wing]
+        if not metadatas:
+            probe = _fast_collection_metadata(col, _HALLWAY_KEYS, equals=scope)
+            try:
+                first = next(probe, None)
+            finally:
+                probe.close()
+            if isinstance(first, dict) and first.get("wing") == wing:
+                metadatas = [first]
+    except MetadataRecoveryPending:
+        logger.debug("compute_hallways_for_wing: metadata recovery pending for %s", wing)
+        return None
+    except Exception:
+        logger.warning(
+            "compute_hallways_for_wing: sqlite metadata scan failed for %s; paging instead",
+            wing,
+            exc_info=True,
+        )
+        return None
+    return metadatas
+
+
+def _wing_metadata_paged(col, wing: str) -> list:
+    """The wing's drawer metadata: scoped to the wing server-side AND paginated.
+
+    An unbounded get(where={"wing": wing}) binds one SQL variable per matched
+    id and overflows SQLite's SQLITE_MAX_VARIABLE_NUMBER (32766) on wings >
+    ~32k drawers (#1619); a bounded page binds at most batch_size ids. Walking
+    the WHOLE collection instead and filtering client-side cost O(total palace
+    drawers) on every mine, so filing one small session into an 800k-drawer
+    palace pegged the CPU for minutes (#2466). The client-side wing check
+    stays as a guard for stores that ignore ``where``. The loop ends on a
+    short page: count() counts every wing, so it cannot bound a scoped walk.
+    """
+    metadatas: list = []
+    batch_size = 5000
+    offset = 0
+    while True:
+        batch = col.get(
+            where={"wing": wing},
+            limit=batch_size,
+            offset=offset,
+            include=["metadatas"],
+        )
+        batch_metas = (batch or {}).get("metadatas") or []
+        if not batch_metas:
+            break
+        metadatas.extend(m for m in batch_metas if isinstance(m, dict) and m.get("wing") == wing)
+        offset += len(batch_metas)
+        if len(batch_metas) < batch_size:
+            break
+    return metadatas
 
 
 def compute_hallways_for_wing(
@@ -568,7 +660,9 @@ def compute_hallways_for_wing(
 
     Args:
         wing: wing name to scan.
-        col: ChromaDB collection — must support paginated
+        col: ChromaDB collection. A Chroma collection is read in one pass
+            over ``chroma.sqlite3`` (see :func:`_wing_metadata_from_sqlite`).
+            Any other must support paginated
             ``.get(where={"wing": ...}, limit=..., offset=..., include=...)``.
             The fetch is scoped to ``wing`` server-side AND paginated: an
             unbounded ``.get(where=...)`` binds one SQL variable per matched
@@ -619,37 +713,12 @@ def compute_hallways_for_wing(
         threshold = min_count
     min_count = max(1, int(threshold))
 
-    # 1. Query drawers for this wing: scoped to the wing server-side AND
-    #    paginated. An unbounded get(where={"wing": wing}) binds one SQL
-    #    variable per matched id and overflows SQLite's
-    #    SQLITE_MAX_VARIABLE_NUMBER (32766) on wings > ~32k drawers (#1619);
-    #    a bounded page binds at most batch_size ids. Walking the WHOLE
-    #    collection instead and filtering client-side cost O(total palace
-    #    drawers) on every mine, so filing one small session into an 800k-
-    #    drawer palace pegged the CPU for minutes (#2466). The client-side
-    #    wing check stays as a guard for stores that ignore ``where``. The
-    #    loop ends on a short page: count() counts every wing, so it cannot
-    #    bound a scoped walk.
-    metadatas: list = []
+    # 1. Query drawers for this wing. On Chroma, one linear pass over the
+    #    drawers holding entities (#2684); elsewhere, wing-scoped pages.
     try:
-        batch_size = 5000
-        offset = 0
-        while True:
-            batch = col.get(
-                where={"wing": wing},
-                limit=batch_size,
-                offset=offset,
-                include=["metadatas"],
-            )
-            batch_metas = (batch or {}).get("metadatas") or []
-            if not batch_metas:
-                break
-            metadatas.extend(
-                m for m in batch_metas if isinstance(m, dict) and m.get("wing") == wing
-            )
-            offset += len(batch_metas)
-            if len(batch_metas) < batch_size:
-                break
+        metadatas = _wing_metadata_from_sqlite(col, wing)
+        if metadatas is None:
+            metadatas = _wing_metadata_paged(col, wing)
     except Exception:
         logger.warning(
             "compute_hallways_for_wing: collection fetch failed for %s", wing, exc_info=True
@@ -675,7 +744,7 @@ def compute_hallways_for_wing(
         if not isinstance(meta, dict):
             continue
         # Sentinel drawers carry no real content — skip them.
-        if meta.get("is_sentinel"):
+        if is_bookkeeping(meta):
             continue
         entities = []
         for spelling in _parse_entities(meta.get("entities")):
@@ -726,7 +795,7 @@ def compute_hallways_for_wing(
     # Load → materialize → save under the hallway-file lock, or a mine of
     # another wing in between rewrites the file without this wing's records.
     with _hallway_file_lock(config):
-        existing = _load_hallways(config)
+        existing = _load_hallways_for_write(config)
         existing_dynamics_lookup: dict = {}
         for h in existing:
             if h.get("wing") != wing:
@@ -892,7 +961,7 @@ def _merge_variant_group(members: list[dict], kept: list[dict], duplicates: list
 
 
 def _prune_spelling_hallways_locked(config, apply: bool) -> dict:
-    hallways = _load_hallways(config)
+    hallways = _load_hallways_for_write(config) if apply else _load_hallways(config)
     self_links = [h for h in hallways if is_self_link(h)]
     candidates = [h for h in hallways if isinstance(h, dict) and not is_self_link(h)]
     duplicates: list[dict] = []
@@ -925,7 +994,7 @@ def _prune_spelling_hallways_locked(config, apply: bool) -> dict:
 def delete_hallway(hallway_id: str, config=None) -> bool:
     """Remove one hallway record by id. Returns True if a record was removed."""
     with _hallway_file_lock(config):
-        hallways = _load_hallways(config)
+        hallways = _load_hallways_for_write(config)
         filtered = [h for h in hallways if h.get("id") != hallway_id]
         if len(filtered) == len(hallways):
             return False

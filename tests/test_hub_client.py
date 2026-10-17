@@ -27,7 +27,11 @@ def test_discover_hub_propagates_local_bearer_token(monkeypatch):
 
     assert hub_client.discover_hub("C:/private-palace") == (
         "http://127.0.0.1:7",
-        {"Content-Type": "application/json", "Authorization": "Bearer private-token"},
+        {
+            "Content-Type": "application/json",
+            "X-MemPalace-Exact": "1",
+            "Authorization": "Bearer private-token",
+        },
     )
 
 

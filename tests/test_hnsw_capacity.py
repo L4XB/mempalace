@@ -20,14 +20,13 @@ from mempalace.backends.chroma import (
     _fts_tokens,
     _hnsw_element_count,
     _hnsw_indexed_ids,
-    _whole_words_first,
     _vector_segment_id,
+    _whole_words_first,
     hnsw_capacity_status,
     reset_hnsw_capacity_cache,
     searchable_coverage,
 )
 from mempalace.searcher import _bm25_only_via_sqlite
-
 
 COLLECTION = "mempalace_drawers"
 

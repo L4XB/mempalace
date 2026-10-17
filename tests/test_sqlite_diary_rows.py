@@ -1,12 +1,11 @@
 """SQLite diary reads preserve collection semantics without hydrating a palace."""
 
-from contextlib import contextmanager
 import sqlite3
+from contextlib import contextmanager
 
 import pytest
 
 from mempalace.backends import chroma
-
 
 _NAME = "mempalace_drawers"
 _MISSING = object()

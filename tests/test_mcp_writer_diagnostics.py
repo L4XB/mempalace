@@ -87,7 +87,7 @@ def test_light_dispatch_writes_and_reads_after_config_repair(isolated_writer, mo
     ):
         monkeypatch.setattr(mcp, name, None)
     monkeypatch.setattr(
-        embedding_wrapper, "_embed_texts", lambda texts: [[1.0, 0.0] for _ in texts]
+        embedding_wrapper, "_embed_texts", lambda texts, **_kwargs: [[1.0, 0.0] for _ in texts]
     )
 
     def call(name, arguments):
@@ -154,6 +154,7 @@ def test_light_hub_forward_does_not_acquire_local_writer(isolated_writer, monkey
 def test_peer_sync_thread_does_not_pollute_unrelated_palace(tmp_path, monkeypatch):
     """Issue #2493: peer sync thread must not create or mutate other palaces."""
     import threading
+
     import mempalace.logsync as logsync_mod
     from mempalace.config import MempalaceConfig
 

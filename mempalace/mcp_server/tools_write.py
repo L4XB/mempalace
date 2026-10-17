@@ -375,7 +375,7 @@ def _fill_drawer_previews(col, page: list) -> None:
     _apply_drawer_previews(page, docs_by_id)
 
 
-def _fill_drawer_previews_from_sqlite(page: list) -> None:
+def _fill_drawer_previews_from_sqlite(page: list, *, connection=None) -> bool:
     """Same, reading the page's documents straight from ``chroma.sqlite3``.
 
     The list itself is answered from metadata only — joining documents into
@@ -384,18 +384,16 @@ def _fill_drawer_previews_from_sqlite(page: list) -> None:
     """
     physical_ids = _page_physical_ids(page)
     if not physical_ids:
-        return
+        return True
     from ..backends.chroma import sqlite_documents_for_ids
 
     docs_by_id = sqlite_documents_for_ids(
-        _config.palace_path, _config.collection_name, physical_ids
+        _config.palace_path, _config.collection_name, physical_ids, _connection=connection
     )
     if docs_by_id is None:
-        # sqlite went unreadable between the two reads; previews are a
-        # display detail, so degrade to blank rather than fail the listing.
-        logger.debug("sqlite preview hydration failed; leaving previews empty")
-        return
+        return False
     _apply_drawer_previews(page, docs_by_id)
+    return True
 
 
 def _collapse_drawer_rows(ids, documents, metadatas):
@@ -639,7 +637,7 @@ def tool_add_drawer(
         _wal_result("add_drawer", outcome)
         return outcome
     except Exception as e:
-        outcome = {"success": False, "error": str(e)}
+        outcome = _embed_failure(e, success=False)
         _wal_result("add_drawer", outcome)
         return outcome
 
@@ -666,8 +664,18 @@ def _delete_record(col, drawer_id: str, record, *, bulk: bool = False):
     col.delete(ids=record["ids"])
     _invalidate_overview_caches()
 
+    from ..palace import drawers_removed
+
     source_file = record["metadata"].get("source_file")
-    closets_deleted = _purge_source_closets(source_file, commit=True) if source_file else 0
+    removed_ids = [drawer_id, *record["ids"]]
+    purged = drawers_removed(
+        _config.palace_path,
+        aaak_ids=removed_ids,
+        closet_sources=[source_file] if source_file else (),
+        # A batch purges revisions once for every id it deleted (tool_delete_drawers).
+        revision_ids=None if bulk else removed_ids,
+    )
+    closets_deleted = purged.pop("closets_deleted", 0)
 
     logger.info(
         "Deleted drawer: %s (%s rows, %s closet(s) purged)%s",
@@ -677,13 +685,15 @@ def _delete_record(col, drawer_id: str, record, *, bulk: bool = False):
         " [bulk]" if bulk else "",
     )
 
-    return {
+    outcome = {
         "success": True,
         "drawer_id": drawer_id,
         "deleted_ids": record["ids"],
         "chunks_deleted": len(record["ids"]),
         "closets_deleted": closets_deleted,
     }
+    outcome.update(purged)
+    return outcome
 
 
 def _delete_resolved_drawer(col, drawer_id: str, *, bulk: bool = False):
@@ -822,6 +832,7 @@ def tool_mine(
     dry_run: bool = False,
     extract: str = "exchange",
     include_ignored: Optional[list[str]] = None,
+    include_subagents: bool = False,
 ):
     """Mine a directory into the palace — the MCP equivalent of ``mempalace mine``.
 
@@ -844,18 +855,24 @@ def tool_mine(
              ``"general"``; ignored by the other modes.
     include_ignored: project-relative paths to scan even if ignored, matching
                      the CLI's ``--include-ignored``; projects mode only.
+    include_subagents: also mine Claude Code ``subagents/`` transcript dirs,
+                       matching the CLI's ``--include-subagents``; convos mode
+                       only, ignored by the other modes.
 
     Runs synchronously and mirrors the :func:`tool_sync` contract: success
     returns ``{success: True, mode, dry_run, output[, output_truncated]}`` where ``output`` is
     the miner's human-readable summary (captured so it cannot corrupt the
     JSON-RPC stream); failure returns ``{success: False, error[, error_class]}``.
+    A mine that ran but could not file some files returns ``success: False``
+    with ``error_class: "MineFileErrors"``, ``files_failed``, up to 20
+    ``failed_files`` and the same ``output``.
     The palace write lock is held by the miners themselves, so a concurrent mine
     surfaces as a structured already-running error. Orphan cleanup is not part of
     mining — use ``mempalace_sync`` for that.
     """
     global _metadata_cache
     from ..daemon import LOCK_REFUSAL_ERROR_CLASS
-    from ..palace import MineAlreadyRunning, MineValidationError
+    from ..palace import MineAlreadyRunning, MineFileErrors, MineValidationError
 
     if not _config.palace_path:
         np = _no_palace()
@@ -883,6 +900,14 @@ def tool_mine(
             "error": "include_ignored is supported only in projects mode",
             "error_class": "ValueError",
         }
+    # A truthy non-boolean ("false", 1) would silently opt into mining every
+    # subagent transcript, so accept only a real JSON boolean.
+    if not isinstance(include_subagents, bool):
+        return {
+            "success": False,
+            "error": "include_subagents must be a boolean",
+            "error_class": "ValueError",
+        }
 
     src = os.path.expanduser(source) if source else ""
     # convos accepts one conversation file as well as a directory — the CLI has
@@ -897,6 +922,14 @@ def tool_mine(
         return {"success": False, "error": f"source not found: {source!r}"}
 
     def _run():
+        # Files that failed are reported with the summary the mine printed,
+        # which an exception escaping the stdout capture would discard.
+        try:
+            return _run_miner()
+        except MineFileErrors as exc:
+            return exc
+
+    def _run_miner():
         if mode == "convos":
             from ..convo_miner import mine_convos
 
@@ -908,6 +941,7 @@ def tool_mine(
                 limit=limit,
                 dry_run=dry_run,
                 extract_mode=extract,
+                include_subagents=include_subagents,
             )
         if mode == "extract":
             from ..format_miner import mine_formats
@@ -987,6 +1021,12 @@ def tool_mine(
         # payload to the MCP client. The useful summary is at the tail, so keep
         # the end and flag the truncation (never silently).
         payload = {"success": True, "mode": mode, "dry_run": dry_run, "output": output}
+        if isinstance(_result, MineFileErrors):
+            payload["success"] = False
+            payload["error"] = str(_result)
+            payload["error_class"] = "MineFileErrors"
+            payload["files_failed"] = len(_result.failed_files)
+            payload["failed_files"] = list(_result.failed_files[:20])
         cap = 4000
         if len(output) > cap:
             payload["output"] = output[-cap:]
@@ -995,41 +1035,6 @@ def tool_mine(
     finally:
         if not dry_run:
             _invalidate_overview_caches()
-
-
-def _purge_source_closets(source_file: str, *, commit: bool) -> int:
-    """Count, and optionally delete, closets matching ``source_file`` exactly.
-
-    The closets collection is the searchable AAAK index layer; it is keyed by
-    ``source_file`` independently of the drawers collection, so a drawer-only
-    delete would strand stale index pointers at the deleted source (#1722).
-    Mirrors the closet-purge step in :func:`mempalace.sync.sync_palace` and the
-    re-mine purge in :func:`mempalace.palace.purge_file_closets`.
-
-    Best-effort: a missing or unavailable closet collection yields 0 and never
-    raises, so it can never abort a drawer delete that has already committed.
-    Deletion is pushed down via ``delete(where=...)`` so it survives palaces
-    larger than the 10k ``get()`` truncation; the returned count is the (best
-    effort) number of matching closets observed before the delete.
-    """
-    from ..palace import get_closets_collection
-
-    try:
-        closets_col = get_closets_collection(_config.palace_path, create=False)
-    except Exception as exc:
-        logger.warning("Closet purge skipped (collection unavailable): %s", exc)
-        return 0
-    if closets_col is None:
-        return 0
-    try:
-        ids = closets_col.get(where={"source_file": source_file}, include=[]).get("ids") or []
-        count = len(ids)
-        if commit and count:
-            closets_col.delete(where={"source_file": source_file})
-        return count
-    except Exception as exc:
-        logger.warning("Closet purge failed for %s: %s", source_file, exc)
-        return 0
 
 
 def tool_delete_by_source(source_file: str, dry_run: bool = True):
@@ -1092,8 +1097,10 @@ def tool_delete_by_source(source_file: str, dry_run: bool = True):
         if len(sample) >= 5:
             break
 
+    from ..palace import drawers_removed, purge_source_closets
+
     if dry_run:
-        closet_match_count = _purge_source_closets(source_file, commit=False)
+        closet_match_count = purge_source_closets(_config.palace_path, source_file, commit=False)
         return {
             "success": True,
             "dry_run": True,
@@ -1126,12 +1133,13 @@ def tool_delete_by_source(source_file: str, dry_run: bool = True):
     try:
         col.delete(where=where)
         _invalidate_overview_caches()
-        # Purge the matching closets too so the AAAK index doesn't keep stale
-        # pointers at the now-deleted drawers (#1722). Done after the drawer
-        # delete and intentionally best-effort: the drawers are already gone,
-        # so a closet-purge hiccup must not turn a successful delete into an
-        # error — it just leaves index cruft a later `repair` / re-mine clears.
-        closets_deleted = _purge_source_closets(source_file, commit=True)
+        purged = drawers_removed(
+            _config.palace_path,
+            aaak_source=source_file,
+            closet_sources=[source_file],
+            revision_source=source_file,
+        )
+        closets_deleted = purged.pop("closets_deleted")
         logger.info(
             "Deleted %d drawer(s) and %d closet(s) from source: %s",
             match_count,
@@ -1144,6 +1152,7 @@ def tool_delete_by_source(source_file: str, dry_run: bool = True):
             "source_file": source_file,
             "deleted": match_count,
             "closets_deleted": closets_deleted,
+            **purged,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -1188,12 +1197,37 @@ def tool_sync(project_dir: str = None, wing: str = None, apply: bool = False):
             _invalidate_overview_caches()
 
 
-def tool_get_drawer(drawer_id: str):
+def _with_source_bytes(payload: dict) -> dict:
+    """Add the drawer's exact source bytes, base64, when it names an encoding.
+
+    A client shows a stray source byte as U+FFFD; these bytes are what the
+    source held for this drawer's text (newlines as read, in text mode).
+    """
+    import base64
+
+    from ..fsio import encode_source
+
+    encoding = payload.get("metadata", {}).get("source_encoding")
+    if not encoding:
+        return payload
+    try:
+        raw = encode_source(payload["content"], encoding)
+    except (UnicodeEncodeError, ValueError):
+        # The text no longer fits the stamp (a drawer edited before stamps
+        # were dropped on update); the drawer still comes back.
+        payload["source_bytes_note"] = f"content is not representable as {encoding}"
+        return payload
+    payload["source_bytes_base64"] = base64.b64encode(raw).decode("ascii")
+    return payload
+
+
+def tool_get_drawer(drawer_id: str, include_source_bytes: bool = False):
     """Fetch a single logical drawer by ID."""
+    finish = _with_source_bytes if include_source_bytes else (lambda payload: payload)
     try:
         record = _sqlite_logical_drawer_record(drawer_id)
         if record is not None:
-            return _drawer_payload(record)
+            return finish(_drawer_payload(record))
     except Exception as e:
         return {"error": str(e)}
 
@@ -1205,7 +1239,7 @@ def tool_get_drawer(drawer_id: str):
         record = _collection_logical_drawer_record(col, drawer_id)
         if record is None:
             return {"error": f"Drawer not found: {drawer_id}"}
-        return _drawer_payload(record)
+        return finish(_drawer_payload(record))
     except Exception as e:
         return {"error": str(e)}
 
@@ -1331,62 +1365,69 @@ def tool_list_drawers(
         return {"error": str(e)}
 
     try:
-        where = None
-        conditions = []
+        where = build_where_filter(wing, room) or None
 
-        if wing:
-            conditions.append({"wing": wing})
-        if room:
-            conditions.append({"room": room})
+        def make_page(ids, metadatas):
+            kept = [(i, m) for i, m in zip(ids, metadatas) if not is_bookkeeping(m, i)]
+            drawers = _collapse_drawer_rows([i for i, _ in kept], [], [m for _, m in kept])
+            if since_dt is not None or before_dt is not None:
+                drawers = [
+                    d
+                    for d in drawers
+                    if _filed_at_in_window(
+                        d.get("metadata", {}).get("filed_at"), since_dt, before_dt
+                    )
+                ]
+            page = drawers[offset : offset + limit]
+            return {
+                "drawers": page,
+                "total": len(drawers),
+                "count": len(page),
+                "offset": offset,
+                "limit": limit,
+            }
 
-        if len(conditions) == 1:
-            where = conditions[0]
-        elif len(conditions) > 1:
-            where = {"$and": conditions}
-
-        listed = None
         if _is_chroma_backend() and _config.palace_path:
-            from ..backends.chroma import sqlite_list_id_metadata
+            from ..backends.chroma import sqlite_list_id_metadata, sqlite_metadata_snapshot
 
-            listed = sqlite_list_id_metadata(
-                _config.palace_path, _config.collection_name, where=where
-            )
-        if listed is not None:
-            # Documents are fetched for the displayed page only, below.
-            ids, metadatas = listed
-            documents = []
-        else:
-            col = _get_collection()
-            if not col:
-                return _collection_error_or_no_palace()
-            ids, documents, metadatas = _fetch_drawer_rows(col, where=where, include=["metadatas"])
-        drawers = _collapse_drawer_rows(ids, documents, metadatas)
+            # Metadata selection, logical grouping and page-only text hydration
+            # share a recovered SQLite snapshot. Close it before any SDK fallback.
+            with sqlite_metadata_snapshot(_config.palace_path, _config.collection_name) as conn:
+                if conn is not None:
+                    listed = sqlite_list_id_metadata(
+                        _config.palace_path, _config.collection_name, where=where, _connection=conn
+                    )
+                    if listed is not None:
+                        result = make_page(*listed)
+                        if _fill_drawer_previews_from_sqlite(result["drawers"], connection=conn):
+                            return result
 
-        if since_dt is not None or before_dt is not None:
-            drawers = [
-                d
-                for d in drawers
-                if _filed_at_in_window(d.get("metadata", {}).get("filed_at"), since_dt, before_dt)
-            ]
-
-        page = drawers[offset : offset + limit]
-        if listed is not None:
-            _fill_drawer_previews_from_sqlite(page)
-        else:
-            col = _get_collection()
-            if col:
-                _fill_drawer_previews(col, page)
-
-        return {
-            "drawers": page,
-            "total": len(drawers),
-            "count": len(page),
-            "offset": offset,
-            "limit": limit,
-        }
+        col = _get_collection()
+        if not col:
+            return _collection_error_or_no_palace()
+        ids, _documents, metadatas = _fetch_drawer_rows(col, where=where, include=["metadatas"])
+        result = make_page(ids, metadatas)
+        _fill_drawer_previews(col, result["drawers"])
+        return result
     except Exception as e:
         logger.exception("tool_list_drawers failed")
         return {"error": str(e)}
+
+
+# Stamps that say how the source file was read. Text a caller writes into a
+# drawer did not come from that file, so they no longer describe it.
+_SOURCE_READ_KEYS = ("source_encoding", "transforms")
+
+
+def _drop_source_read_stamps(col, meta: dict) -> None:
+    for key in _SOURCE_READ_KEYS:
+        if key not in meta:
+            continue
+        if getattr(col, "upsert_merges_metadata", False) is True:
+            # Chroma keeps a key the write leaves out; None removes it.
+            meta[key] = None
+        else:
+            del meta[key]
 
 
 def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, room: str = None):
@@ -1416,6 +1457,8 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
                 return {"success": False, "error": str(e)}
 
         new_meta = dict(old_meta)
+        if content is not None:
+            _drop_source_read_stamps(col, new_meta)
 
         if wing is not None:
             try:
@@ -1438,6 +1481,29 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
                 new_meta["room"] = room
 
         new_meta["last_modified"] = datetime.now().isoformat()
+
+        chunk_size = max(1, int(getattr(_config, "chunk_size", 800) or 800))
+        should_chunk = bool(record.get("chunked")) or len(new_doc) > chunk_size
+        # The chunked path rewrites stored documents even for a metadata-only
+        # change. Keep the prior verbatim text before either overwrite. The WAL
+        # redacts content, so it is not this copy.
+        revision_id = None
+        if content is not None or should_chunk:
+            from ..revisions import append_drawer_revision
+
+            try:
+                revision_id = append_drawer_revision(
+                    _config.palace_path,
+                    drawer_id,
+                    old_doc if isinstance(old_doc, str) else "",
+                    old_meta,
+                )
+            except OSError as exc:
+                return {
+                    "success": False,
+                    "error": f"could not record prior drawer text: {exc}",
+                }
+
         _wal_log(
             "update_drawer",
             {
@@ -1448,19 +1514,16 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
                 "new_room": new_meta.get("room", ""),
                 "content_changed": content is not None,
                 "content_preview": new_doc[:200] if content is not None else None,
+                "revision_id": revision_id,
             },
         )
 
-        # A closet quotes the source file, not the stored drawer, so it only
-        # goes stale on a content change; wing/room alone leaves it correct (#2325).
-        closets_deleted = 0
-        source_file = old_meta.get("source_file")
-        if content is not None and source_file:
-            closets_deleted = _purge_source_closets(source_file, commit=True)
-
-        chunk_size = max(1, int(getattr(_config, "chunk_size", 800) or 800))
-        should_chunk = bool(record.get("chunked")) or len(new_doc) > chunk_size
-
+        outcome = {
+            "success": True,
+            "drawer_id": drawer_id,
+            "wing": new_meta.get("wing", ""),
+            "room": new_meta.get("room", ""),
+        }
         if should_chunk:
             chunk_ids, chunk_docs, chunk_metas = _build_chunk_rows(
                 drawer_id,
@@ -1476,39 +1539,40 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             if stale_ids:
                 col.delete(ids=stale_ids)
 
-            _invalidate_overview_caches()
-
+            outcome["chunks"] = len(chunk_ids)
+            outcome["chunk_ids"] = chunk_ids
             logger.info("Updated drawer: %s (%s rows)", drawer_id, len(chunk_ids))
+        else:
+            update_kwargs = {"ids": [record["ids"][0]]}
+            if content is not None:
+                update_kwargs["documents"] = [new_doc]
+            update_kwargs["metadatas"] = [new_meta]
 
-            return {
-                "success": True,
-                "drawer_id": drawer_id,
-                "wing": new_meta.get("wing", ""),
-                "room": new_meta.get("room", ""),
-                "chunks": len(chunk_ids),
-                "chunk_ids": chunk_ids,
-                "closets_deleted": closets_deleted,
-            }
+            col.update(**update_kwargs)
+            logger.info("Updated drawer: %s", drawer_id)
 
-        update_kwargs = {"ids": [record["ids"][0]]}
+        # A closet quotes the source file, not the stored drawer, so it only
+        # goes stale on a content change; wing/room alone leaves it correct (#2325).
+        # Purged only after the drawer write commits, so a failed write keeps them.
+        outcome["closets_deleted"] = 0
         if content is not None:
-            update_kwargs["documents"] = [new_doc]
-        update_kwargs["metadatas"] = [new_meta]
+            from ..palace import drawers_removed
 
-        col.update(**update_kwargs)
+            source_file = old_meta.get("source_file")
+            outcome["closets_deleted"] = drawers_removed(
+                _config.palace_path,
+                aaak_ids=[drawer_id, *record["ids"]],
+                closet_sources=[source_file] if source_file else (),
+            ).get("closets_deleted", 0)
         _invalidate_overview_caches()
-
-        logger.info("Updated drawer: %s", drawer_id)
-
-        return {
-            "success": True,
-            "drawer_id": drawer_id,
-            "wing": new_meta.get("wing", ""),
-            "room": new_meta.get("room", ""),
-            "closets_deleted": closets_deleted,
-        }
+        if revision_id:
+            outcome["revision_id"] = revision_id
+        _wal_result("update_drawer", outcome)
+        return outcome
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        outcome = _embed_failure(e, success=False)
+        _wal_result("update_drawer", outcome)
+        return outcome
 
 
 def tool_delete_drawers(drawer_ids: list):
@@ -1520,7 +1584,9 @@ def tool_delete_drawers(drawer_ids: list):
     come back in input order. A missing id is an ``error`` slot counted in
     ``errors``; later ids are still deleted.
 
-    A list of 1 to 500 ids returns ``{"results", "count", "deleted", "errors"}``.
+    A list of 1 to 500 ids returns
+    ``{"results", "count", "deleted", "errors", "revisions_deleted"}`` (plus
+    ``revisions_error`` when the revision purge failed).
     A non-list, an empty list, or more than 500 ids returns ``{"error"}``
     and deletes nothing.
     """
@@ -1541,6 +1607,7 @@ def tool_delete_drawers(drawer_ids: list):
     results = []
     deleted = 0
     errors = 0
+    deleted_ids: list[str] = []
     for drawer_id in drawer_ids:
         try:
             if found is None:
@@ -1561,6 +1628,7 @@ def tool_delete_drawers(drawer_ids: list):
             results.append({"drawer_id": drawer_id, "error": outcome["error"]})
             continue
         deleted += 1
+        deleted_ids += [drawer_id, *outcome["deleted_ids"]]
         results.append(
             {
                 "drawer_id": drawer_id,
@@ -1570,9 +1638,12 @@ def tool_delete_drawers(drawer_ids: list):
             }
         )
 
+    from ..palace import drawers_removed
+
     return {
         "results": results,
         "count": len(results),
         "deleted": deleted,
         "errors": errors,
+        **drawers_removed(_config.palace_path, revision_ids=deleted_ids),
     }

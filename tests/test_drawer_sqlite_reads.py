@@ -1,14 +1,13 @@
 """Singular drawer SQLite lookups preserve logical-ID and mutation semantics."""
 
+import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-import sqlite3
 from unittest.mock import Mock
 
 import chromadb
 import pytest
-
 from _mcp_server_helpers import _patch_mcp_server
 
 

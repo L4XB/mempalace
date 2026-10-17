@@ -17,7 +17,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import ClassVar, Optional, Protocol, runtime_checkable
 
-
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -81,6 +80,57 @@ class DimensionMismatchError(BackendError):
 
 class EmbedderIdentityMismatchError(BackendError):
     """Raised when the stored embedder model name differs from the current one."""
+
+
+class EmbeddingFunctionMismatchError(BackendError, ValueError):
+    """Raised when a backend's persisted embedding function differs from the current one.
+
+    Chroma stores the embedding function's name on each collection and
+    refuses to open it with another. A ``ValueError`` subclass, as the bare
+    error used to be, so existing ``except ValueError`` callers still see it.
+    """
+
+
+# ``error`` values of tool and search results for the three mismatch errors
+# above. MCP flags results carrying one of them with ``isError``.
+EMBEDDER_IDENTITY_MISMATCH_ERROR = "Embedder identity mismatch"
+EMBEDDING_DIMENSION_MISMATCH_ERROR = "Embedding dimension mismatch"
+EMBEDDING_MODEL_MISMATCH_ERROR = "Embedding model mismatch"
+
+
+class EmbedderIdentityRecordError(BackendError):
+    """The embedder identity could not be recorded for a collection.
+
+    Raised on write paths only (a brand-new collection's first write open,
+    ``palace set-embedder``): writing on without a recorded identity would
+    leave the palace unprotected against a later same-dimension model swap.
+    Reads never record an identity, so they never raise it.
+    """
+
+
+EMBEDDER_IDENTITY_NOT_RECORDED_ERROR = "Embedder identity not recorded"
+
+
+def model_mismatch_error_kind(exc: BaseException) -> Optional[str]:
+    """The result ``error`` value for a model mismatch error, else None."""
+    if isinstance(exc, EmbedderIdentityRecordError):
+        return EMBEDDER_IDENTITY_NOT_RECORDED_ERROR
+    if isinstance(exc, EmbedderIdentityMismatchError):
+        return EMBEDDER_IDENTITY_MISMATCH_ERROR
+    if isinstance(exc, DimensionMismatchError):
+        return EMBEDDING_DIMENSION_MISMATCH_ERROR
+    if isinstance(exc, EmbeddingFunctionMismatchError):
+        return EMBEDDING_MODEL_MISMATCH_ERROR
+    return None
+
+
+# Re-embedding with the current model: in place (archives the original), or
+# into a separate palace from the original's SQLite.
+_RE_EMBED_HINT = (
+    "re-embed with the current model: `mempalace repair rebuild-index` (in place; "
+    "archives the original palace first) or `mempalace --palace <new-palace> repair "
+    "--mode from-sqlite --source <palace>` (into a separate palace)"
+)
 
 
 class EmbedderIdentityUnknownWarning(UserWarning):
@@ -234,14 +284,15 @@ def check_embedder_identity(
             f"collection was built with a {stored.dimension}-dim embedder "
             f"({stored.model_name!r}) but the current embedder is "
             f"{current.dimension}-dim ({current.model_name!r}); the stored "
-            "vectors are incompatible. Re-embed the palace to switch models."
+            "vectors are incompatible. Set embedding_model back to the model "
+            f"the palace was built with, or {_RE_EMBED_HINT}."
         )
     raise EmbedderIdentityMismatchError(
         f"collection was built with embedder {stored.model_name!r} but the "
         f"current embedder is {current.model_name!r}. Searching across a model "
-        "swap silently degrades recall. Re-embed the palace, or run "
-        "`mempalace palace set-embedder --model <name> --force` to record the "
-        "new identity if you know the vectors are compatible."
+        "swap silently degrades recall. Set embedding_model (config.json or "
+        "MEMPALACE_EMBEDDING_MODEL) back to the model the palace was built with, "
+        f"or {_RE_EMBED_HINT}."
     )
 
 
@@ -419,6 +470,9 @@ def initialize_last_modified_metadata(metadatas):
 
 class BaseCollection(ABC):
     """Per-collection read/write surface every backend must implement."""
+
+    # Chroma retains omitted metadata fields on upsert; replacing backends do not.
+    upsert_merges_metadata = False
 
     @abstractmethod
     def add(
@@ -753,6 +807,11 @@ class BaseCollection(ABC):
     ) -> None:
         """Default non-atomic update: get + merge + upsert.
 
+        Ids that do not exist are skipped, as on every built-in backend; an
+        update never creates a record. Stored embeddings are kept when the
+        caller passes none and the backend returns one for every row; if any
+        row has none, the whole batch is re-embedded in the same single upsert.
+
         Backends advertising ``supports_update`` MUST override with an atomic
         single-round-trip implementation.
         """
@@ -768,25 +827,39 @@ class BaseCollection(ABC):
             if value is not None and len(value) != n:
                 raise ValueError(f"{label} length {len(value)} does not match ids length {n}")
 
-        existing = self.get(ids=ids, include=["documents", "metadatas"])
+        existing = self.get(ids=list(ids), include=["documents", "metadatas", "embeddings"])
+        stored_embeddings = existing.embeddings
         by_id = {
-            rid: (existing.documents[i], existing.metadatas[i])
+            rid: (
+                existing.documents[i],
+                existing.metadatas[i],
+                stored_embeddings[i] if stored_embeddings is not None else None,
+            )
             for i, rid in enumerate(existing.ids)
         }
-        merged_docs: list[str] = []
-        merged_metas: list[dict] = []
+        out_ids, out_docs, out_metas, out_embeddings = [], [], [], []
         for i, rid in enumerate(ids):
-            prev_doc, prev_meta = by_id.get(rid, ("", {}))
-            merged_docs.append(documents[i] if documents is not None else prev_doc)
+            if rid not in by_id:
+                continue
+            prev_doc, prev_meta, prev_embedding = by_id[rid]
+            out_ids.append(rid)
+            out_docs.append(documents[i] if documents is not None else prev_doc)
             new_meta = dict(prev_meta or {})
             if metadatas is not None:
                 new_meta.update(metadatas[i] or {})
-            merged_metas.append(new_meta)
+            out_metas.append(new_meta)
+            out_embeddings.append(embeddings[i] if embeddings is not None else prev_embedding)
+        if not out_ids:
+            return
+        # One upsert, so the batch lands whole or not at all. If any row came
+        # back without a stored vector, the backend re-embeds the whole batch.
+        if any(vector is None for vector in out_embeddings):
+            out_embeddings = None
         self.upsert(
-            documents=merged_docs,
-            ids=list(ids),
-            metadatas=merged_metas,
-            embeddings=embeddings,
+            documents=out_docs,
+            ids=out_ids,
+            metadatas=out_metas,
+            embeddings=out_embeddings,
         )
 
 

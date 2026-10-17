@@ -27,7 +27,6 @@ from dataclasses import dataclass
 
 from mempalace.llm_client import LLMError, LLMProvider
 
-
 BATCH_SIZE = 25  # candidates per LLM call; tuned for 4B local models
 CONTEXT_LINES_PER_CANDIDATE = 3
 CONTEXT_WINDOW_CHARS = 240  # max chars per context line to keep tokens bounded

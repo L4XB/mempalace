@@ -226,3 +226,43 @@ def test_assert_no_collisions_tolerates_chromadb_get_failure():
     proposed = [("drawer_X", {"source_file": "/f.md", "chunk_index": 0})]
     with pytest.raises(RuntimeError, match="chromadb is sad"):
         assert_no_collisions(proposed, _RaisingCollection())
+
+
+# ── Same source re-filing vs another source ──────────────────────────
+
+
+def test_assert_no_collisions_lets_the_same_source_move_an_ids_chunk_index():
+    """A diary entry keeps its id when an earlier entry grows, so its
+    chunk_index moves. The stored row is the same source's: a re-write."""
+    proposed = [("drawer_diary", {"source_file": "/2026-04-13.md", "chunk_index": 4})]
+    col = _MockCollection(
+        existing={"drawer_diary": {"source_file": "/2026-04-13.md", "chunk_index": 1}}
+    )
+    assert_no_collisions(proposed, col)
+
+
+def test_assert_no_collisions_still_raises_on_two_chunks_of_one_file_in_a_batch():
+    proposed = [
+        ("drawer_X", {"source_file": "/f.md", "chunk_index": 0}),
+        ("drawer_X", {"source_file": "/f.md", "chunk_index": 1}),
+    ]
+    with pytest.raises(CollisionError):
+        assert_no_collisions(proposed, _MockCollection())
+
+
+@pytest.mark.parametrize("key", ["wing", "extract_mode"])
+def test_assert_no_collisions_raises_when_the_stored_scope_differs(key):
+    proposed = [("drawer_X", {"source_file": "/f.md", "chunk_index": 0, key: "new"})]
+    col = _MockCollection(
+        existing={"drawer_X": {"source_file": "/f.md", "chunk_index": 0, key: "old"}}
+    )
+    with pytest.raises(CollisionError):
+        assert_no_collisions(proposed, col)
+
+
+def test_assert_no_collisions_ignores_a_scope_key_the_legacy_row_lacks():
+    proposed = [
+        ("drawer_X", {"source_file": "/c.jsonl", "chunk_index": 0, "extract_mode": "exchange"})
+    ]
+    col = _MockCollection(existing={"drawer_X": {"source_file": "/c.jsonl", "chunk_index": 0}})
+    assert_no_collisions(proposed, col)

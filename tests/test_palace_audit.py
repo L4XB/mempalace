@@ -11,10 +11,10 @@ from mempalace import palace_audit
 from mempalace.hallways import is_generic_entity
 from mempalace.palace_audit import (
     _analyze_hallways,
-    _name_list,
     _analyze_naming,
     _analyze_rooms,
     _analyze_tunnels,
+    _name_list,
     _read_kg,
     audit_palace,
     drift_key,

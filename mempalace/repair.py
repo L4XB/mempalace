@@ -32,6 +32,7 @@ Usage (from CLI):
 import argparse
 import errno
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -40,11 +41,15 @@ from collections import defaultdict
 from contextlib import closing, suppress
 from dataclasses import dataclass
 from datetime import datetime
-import re
 from typing import Callable, Iterator, Optional
 
 from chromadb.errors import NotFoundError as ChromaNotFoundError
 
+from .backends._inproc_sqlite import (
+    open_reader as open_palace_reader,
+    open_writer as open_palace_writer,
+    release as release_palace_anchor,
+)
 from .backends.chroma import (
     ChromaBackend,
     _clear_chroma_system_cache,
@@ -57,10 +62,7 @@ from .backends.chroma import (
 # backends._inproc_sqlite, which opens them with connect_sqlite_read under the
 # palace's in-process lock.
 from .config import connect_sqlite_read, sqlite_read_uri  # noqa: F401
-from .backends._inproc_sqlite import open_reader as open_palace_reader
-from .backends._inproc_sqlite import open_writer as open_palace_writer
-from .backends._inproc_sqlite import release as release_palace_anchor
-
+from .stored_text import decode_record
 
 COLLECTION_NAME = "mempalace_drawers"
 REPAIR_TEMP_COLLECTION = f"{COLLECTION_NAME}__repair_tmp"
@@ -181,15 +183,48 @@ def _drawers_collection_name() -> str:
         return COLLECTION_NAME
 
 
-def _recoverable_collections() -> tuple[str, ...]:
+def _recoverable_collections(palace_path: Optional[str] = None) -> tuple[str, ...]:
     """Collections rebuilt by ``rebuild_from_sqlite``, in upsert order.
 
     Drawers first (bulk data), then closets (AAAK index layer that
-    references drawer IDs by string in their documents — no
-    foreign-key validation, so ordering is informational, not
-    load-bearing).
+    references drawer IDs by string in their documents), then local media
+    assets. Collection ordering is informational, not load-bearing.
     """
-    return (_drawers_collection_name(), CLOSETS_COLLECTION_NAME)
+    # Media assets are first-class palace data too. The SQLite recovery path
+    # must either restore them with their original modality vectors or fail
+    # explicitly, rather than producing a palace that silently lost them.
+    from .palace import AAAK_COLLECTION_NAME, ASSETS_COLLECTION_NAME
+
+    collections = [_drawers_collection_name(), CLOSETS_COLLECTION_NAME]
+    # Keep the historical result shape for palaces without assets or AAAK
+    # summaries. When a source path is supplied, SQLite ground truth decides
+    # whether there are rows to restore (and, for assets, whether native media
+    # support is required).
+    if palace_path is not None:
+        for name in (ASSETS_COLLECTION_NAME, AAAK_COLLECTION_NAME):
+            count = sqlite_drawer_count(palace_path, name)
+            if count is None or count > 0:
+                collections.append(name)
+    return tuple(dict.fromkeys(collections))
+
+
+def move_aaak_after_rebuild(palace_path: str, *, dry_run: bool = False) -> None:
+    """Move AAAK summaries an older ``compress`` left in the closets.
+
+    Runs once the rebuilt palace is in place; a failure is reported and never
+    undoes the rebuild, since the next ``compress`` retries the move.
+    """
+    from .palace import move_aaak_out_of_closets
+
+    if dry_run:
+        return
+    try:
+        moved = move_aaak_out_of_closets(palace_path)
+    except Exception as exc:
+        print(f"  WARNING: AAAK summaries in the closets were not moved: {exc!r}")
+        return
+    if moved:
+        print(f"  Moved {moved} AAAK summaries out of the closets collection.")
 
 
 # Back-compat alias for callers that imported the constant. New code
@@ -212,6 +247,7 @@ def _get_palace_path():
 def _paginate_ids(col, where=None):
     """Pull all IDs in a collection using pagination."""
     ids = []
+    seen: set = set()
     page = 1000
     offset = 0
     while True:
@@ -237,7 +273,7 @@ def _paginate_ids(col, where=None):
                     f"does not depend on offset paging (e.g. --mode "
                     f"from-sqlite). Underlying error: {fallback_exc}"
                 ) from fallback_exc
-            new_ids = [i for i in r["ids"] if i not in set(ids)]
+            new_ids = [i for i in r["ids"] if i not in seen]
             if not new_ids:
                 # Offset is broken and the no-offset fallback always
                 # re-fetches the same first `page` results, so it can never
@@ -282,12 +318,14 @@ def _paginate_ids(col, where=None):
                         )
                 break
             ids.extend(new_ids)
+            seen.update(new_ids)
             offset += len(new_ids)
             continue
         n = len(r["ids"]) if r["ids"] else 0
         if n == 0:
             break
         ids.extend(r["ids"])
+        seen.update(r["ids"])
         offset += n
         if n < page:
             break
@@ -342,6 +380,113 @@ def _delete_collection_if_exists(backend, palace_path: str, collection_name: str
         return
 
 
+def _embeddinggemma2_collection(collection, enabled: bool):
+    """Wrap rebuild writes with EmbeddingGemma 2's metadata-aware encoder."""
+    if not enabled:
+        return collection
+    from .backends.embedding_wrapper import EmbeddingCollection
+
+    return EmbeddingCollection(collection)
+
+
+def _record_rebuilt_embedder_identity(collection, palace_path: str) -> None:
+    """Record the active identity only after the rebuilt collection verifies.
+
+    A rebuild re-embeds every row with the configured model, so that model
+    is the collection's identity. Called for every collection a rebuild
+    writes (drawers, closets, media assets), on every model (#2709: the
+    rebuilt palace used to come back without mempalace_embedder.json).
+    """
+    from .backends.base import EmbedderIdentityRecordError
+    from .embedding import get_embedder_identity
+    from .palace import clear_validated_embedder_identity
+
+    identity = get_embedder_identity()
+    try:
+        collection.set_embedder_identity(identity)
+    except EmbedderIdentityRecordError as exc:
+        # The rebuilt rows are verified and kept; only the record failed.
+        # Say so loudly instead of leaving the palace unrecorded in silence.
+        print(
+            f"  WARNING: {exc}\n  Once fixed, record it with: mempalace --palace "
+            f"{palace_path} palace set-embedder --model {identity.model_name.split(':')[0]}"
+        )
+    clear_validated_embedder_identity(palace_path)
+
+
+def _asset_media_embedder():
+    """Return the configured provider for native asset re-embedding."""
+    from .embedding import get_embedding_function
+
+    embedder = get_embedding_function()
+    if not callable(getattr(embedder, "embed_media", None)):
+        raise RuntimeError(
+            "repairing mempalace_assets requires an embedding provider with native "
+            "media support; select EmbeddingGemma 2 and enable the asset modality"
+        )
+    return embedder
+
+
+def _embed_asset_rows(embedder, rows):
+    """Encode asset descriptors from their local files and refresh identity metadata."""
+    import copy
+    from pathlib import Path
+
+    vectors = []
+    refreshed = []
+    for doc, meta in zip(rows[0], rows[1]):
+        source_path = meta.get("source_path") or meta.get("source_file")
+        media_type = str(meta.get("media_type", "")).strip().lower()
+        if not isinstance(source_path, str) or not source_path:
+            raise ValueError(
+                "media asset metadata is missing source_path; refusing text re-embedding"
+            )
+        if media_type not in {"image", "audio", "video"}:
+            raise ValueError(
+                f"media asset {source_path!r} has unsupported media_type {media_type!r}"
+            )
+        path = Path(source_path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"media asset is unavailable at {path}; restore the file before rebuilding"
+            )
+        vectors.append(embedder.embed_media(str(path), media_type=media_type))
+        updated = copy.deepcopy(meta)
+        updated.update(
+            {
+                "embedding_model": embedder.identity,
+                "embedding_identity": embedder.identity,
+                "embedding_dimension": int(embedder.dimension),
+                "embedding_modalities": str(embedder.modalities),
+            }
+        )
+        refreshed.append(updated)
+    return vectors, refreshed
+
+
+def _preflight_asset_files(source_palace: str) -> None:
+    """Fail closed before archive/swap when any SQLite asset lacks its source file."""
+    from .palace import ASSETS_COLLECTION_NAME
+
+    asset_count = sqlite_drawer_count(source_palace, ASSETS_COLLECTION_NAME)
+    if asset_count is None:
+        raise ValueError("could not verify the media asset row count in chroma.sqlite3")
+    if asset_count == 0:
+        return
+    for asset_id, _doc, meta in extract_via_sqlite(source_palace, ASSETS_COLLECTION_NAME):
+        source_path = meta.get("source_path") or meta.get("source_file")
+        if not isinstance(source_path, str) or not source_path:
+            raise ValueError(
+                f"media asset {asset_id!r} is missing source_path metadata; "
+                "repair cannot safely reconstruct its vector"
+            )
+        if not os.path.isfile(os.path.expanduser(source_path)):
+            raise FileNotFoundError(
+                f"media asset {asset_id!r} references unavailable file {source_path!r}; "
+                "restore the file before rebuilding"
+            )
+
+
 class RebuildCollectionError(RuntimeError):
     """Raised when temp rebuild fails, carrying whether the live swap happened."""
 
@@ -359,9 +504,13 @@ def _rebuild_collection_via_temp(
     batch_size: int,
     collection_name: Optional[str] = None,
     progress=print,
+    embeddinggemma2: bool = False,
 ) -> int:
     expected = len(all_ids)
     collection_name = collection_name or _drawers_collection_name()
+    from .palace import ASSETS_COLLECTION_NAME
+
+    media_assets = collection_name == ASSETS_COLLECTION_NAME
     temp_name = f"{collection_name}__repair_tmp"
     live_replaced = False
 
@@ -369,13 +518,28 @@ def _rebuild_collection_via_temp(
         _delete_collection_if_exists(backend, palace_path, temp_name)
 
         progress(f"  Building temporary collection: {temp_name}")
+        # Asset descriptors are not the asset representation. Always use the
+        # provider's native media encoder and explicit vectors for this fixed
+        # collection, even when the text wrapper is enabled.
+        asset_embedder = _asset_media_embedder() if media_assets else None
         temp_col = backend.create_collection(palace_path, temp_name)
+        if not media_assets:
+            temp_col = _embeddinggemma2_collection(temp_col, embeddinggemma2)
         staged = 0
         for i in range(0, expected, batch_size):
             batch_ids = all_ids[i : i + batch_size]
             batch_docs = all_docs[i : i + batch_size]
             batch_metas = all_metas[i : i + batch_size]
-            temp_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+            if media_assets:
+                vectors, batch_metas = _embed_asset_rows(asset_embedder, (batch_docs, batch_metas))
+                temp_col.upsert(
+                    documents=batch_docs,
+                    ids=batch_ids,
+                    metadatas=batch_metas,
+                    embeddings=vectors,
+                )
+            else:
+                temp_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
             staged += len(batch_ids)
             progress(f"  Staged {staged}/{expected} drawers...")
         _verify_collection_count(temp_col, expected, "temporary rebuild")
@@ -384,16 +548,29 @@ def _rebuild_collection_via_temp(
         backend.delete_collection(palace_path, collection_name)
         live_replaced = True
         new_col = backend.create_collection(palace_path, collection_name)
+        if not media_assets:
+            new_col = _embeddinggemma2_collection(new_col, embeddinggemma2)
 
         rebuilt = 0
         for i in range(0, expected, batch_size):
             batch_ids = all_ids[i : i + batch_size]
             batch_docs = all_docs[i : i + batch_size]
             batch_metas = all_metas[i : i + batch_size]
-            new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+            if media_assets:
+                vectors, batch_metas = _embed_asset_rows(asset_embedder, (batch_docs, batch_metas))
+                new_col.upsert(
+                    documents=batch_docs,
+                    ids=batch_ids,
+                    metadatas=batch_metas,
+                    embeddings=vectors,
+                )
+            else:
+                new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
             rebuilt += len(batch_ids)
             progress(f"  Re-filed {rebuilt}/{expected} drawers...")
         _verify_collection_count(new_col, expected, "rebuilt live collection")
+        # Verified: record the model that just embedded every row (#2709).
+        _record_rebuilt_embedder_identity(new_col, palace_path)
 
         try:
             _delete_collection_if_exists(backend, palace_path, temp_name)
@@ -431,6 +608,7 @@ def _promote_temp_collection(
     expected: int,
     batch_size: int,
     progress=print,
+    embeddinggemma2: bool = False,
 ) -> int:
     """Recover a failed live-swap by promoting the verified temp copy.
 
@@ -444,18 +622,32 @@ def _promote_temp_collection(
     """
     temp_col = backend.get_collection(palace_path, temp_name)
     ids, docs, metas = _extract_drawers(temp_col, expected, batch_size)
+    from .palace import ASSETS_COLLECTION_NAME
+
+    media_assets = collection_name == ASSETS_COLLECTION_NAME
+    asset_embedder = _asset_media_embedder() if media_assets else None
     _delete_collection_if_exists(backend, palace_path, collection_name)
     new_col = backend.create_collection(palace_path, collection_name)
+    if not media_assets:
+        new_col = _embeddinggemma2_collection(new_col, embeddinggemma2)
     promoted = 0
     for i in range(0, len(ids), batch_size):
-        new_col.upsert(
-            documents=docs[i : i + batch_size],
-            ids=ids[i : i + batch_size],
-            metadatas=metas[i : i + batch_size],
-        )
+        batch_docs = docs[i : i + batch_size]
+        batch_metas = metas[i : i + batch_size]
+        kwargs = {
+            "documents": batch_docs,
+            "ids": ids[i : i + batch_size],
+            "metadatas": batch_metas,
+        }
+        if media_assets:
+            vectors, batch_metas = _embed_asset_rows(asset_embedder, (batch_docs, batch_metas))
+            kwargs["metadatas"] = batch_metas
+            kwargs["embeddings"] = vectors
+        new_col.upsert(**kwargs)
         promoted += len(ids[i : i + batch_size])
         progress(f"  Promoted {promoted}/{expected} drawers from verified temp copy...")
     _verify_collection_count(new_col, expected, "promoted temp collection")
+    _record_rebuilt_embedder_identity(new_col, palace_path)
     # Promotion has already fully succeeded and verified at this point --
     # cleaning up the now-redundant temp copy is best-effort, matching the
     # identical post-success cleanup in _rebuild_collection_via_temp above.
@@ -591,22 +783,27 @@ def prune_corrupt(palace_path=None, confirm=False, collection_name: Optional[str
     print(f"  Collection size before: {before:,}")
 
     batch = 100
-    deleted = 0
+    removed_ids = []
     failed = 0
     for i in range(0, len(bad_ids), batch):
         chunk = bad_ids[i : i + batch]
         try:
             col.delete(ids=chunk)
-            deleted += len(chunk)
+            removed_ids += chunk
         except Exception:
             for sid in chunk:
                 try:
                     col.delete(ids=[sid])
-                    deleted += 1
+                    removed_ids.append(sid)
                 except Exception:
                     failed += 1
         if (i // batch) % 20 == 0:
-            print(f"    deleted {deleted}/{len(bad_ids)}  (failed: {failed})")
+            print(f"    deleted {len(removed_ids)}/{len(bad_ids)}  (failed: {failed})")
+    deleted = len(removed_ids)
+    if removed_ids:
+        from .palace import drawers_removed
+
+        drawers_removed(palace_path, aaak_ids=removed_ids)
 
     after = col.count()
     print(f"\n  Deleted: {deleted:,}")
@@ -816,7 +1013,7 @@ def _is_a_named_pipe(sqlite_path: str) -> bool:
     A read that fails is an answer; a read that never returns is not. Opening a
     FIFO for reading parks in the kernel until a writer arrives, so it has to
     be decided about before reading rather than by reading.
-    ``miner._read_text_no_follow`` meets the same hazard and answers it with
+    ``fsio.open_source_file`` meets the same hazard and answers it with
     ``O_NONBLOCK``; there is no open to pass flags to here, because the open
     happens inside sqlite3.
 
@@ -1113,7 +1310,7 @@ _FTS5_CONTENT_RESTORE_SQL = """
 """
 
 _FTS5_REBUILD_SQL = (
-    "INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('rebuild')"  # noqa: E501
+    "INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('rebuild')"
 )
 
 
@@ -1375,6 +1572,7 @@ def maybe_repair_poisoned_max_seq_id_before_rebuild(
     backup: bool = True,
     dry_run: bool = False,
     assume_yes: bool = False,
+    progress: Callable[[str], None] = print,
 ) -> "dict | None":
     """Run non-destructive max_seq_id repair before a rebuild if needed.
 
@@ -1400,13 +1598,15 @@ def maybe_repair_poisoned_max_seq_id_before_rebuild(
     if not poisoned:
         return None
 
-    print("\n  Detected poisoned max_seq_id rows before repair rebuild.")
-    print(
+    progress("\n  Detected poisoned max_seq_id rows before repair rebuild.")
+    progress(
         "  This can make writes report success while embeddings_queue grows "
         "and embeddings stay static."
     )
-    print("  Running the non-destructive max_seq_id repair instead of rebuilding the collection.")
-    print(
+    progress(
+        "  Running the non-destructive max_seq_id repair instead of rebuilding the collection."
+    )
+    progress(
         "  Queued writes remain in chroma.sqlite3 for Chroma to drain after "
         "the bookmark is unpoisoned."
     )
@@ -1416,6 +1616,7 @@ def maybe_repair_poisoned_max_seq_id_before_rebuild(
         backup=backup,
         dry_run=dry_run,
         assume_yes=assume_yes,
+        progress=progress,
     )
 
 
@@ -1560,6 +1761,18 @@ def _post_rebuild_cleanup(palace_path: str, backend: "ChromaBackend", progress=p
     _vacuum_and_rebuild_fts5(palace_path, progress=progress)
 
 
+def _require_valid_embedding_model() -> None:
+    """Refuse a misspelled ``embedding_model`` before anything is archived or created.
+
+    Reading the config raises :class:`~mempalace.embedding.UnknownEmbeddingModelError`
+    for a near miss; without this the rebuild would archive the palace and
+    only fail once the first collection asks for its embedding function.
+    """
+    from .config import MempalaceConfig
+
+    MempalaceConfig().embedding_model
+
+
 def rebuild_index(
     palace_path=None,
     confirm_truncation_ok: bool = False,
@@ -1593,6 +1806,7 @@ def rebuild_index(
     if not os.path.isdir(palace_path):
         progress(f"\n  No palace found at {palace_path}")
         return
+    _require_valid_embedding_model()
 
     progress(f"\n{'=' * 55}")
     progress("  MemPalace Repair -- Index Rebuild")
@@ -1615,6 +1829,7 @@ def rebuild_index(
     preflight = maybe_repair_poisoned_max_seq_id_before_rebuild(
         palace_path,
         assume_yes=True,
+        progress=progress,
     )
     if preflight is not None:
         return
@@ -1657,8 +1872,21 @@ def _rebuild_index_under_lease(
     progress: Callable[[str], None],
 ):
     """Run rebuild_index's snapshot/rebuild body under its writer lease."""
+    from .config import MempalaceConfig
+
+    embeddinggemma2 = MempalaceConfig().embedding_model == "embeddinggemma2"
     try:
-        col = backend.get_collection(palace_path, collection_name)
+        if embeddinggemma2:
+            # Opening through get_collection binds the configured EF, and
+            # Chroma rejects that name when the existing collection was
+            # created by the previous model. Use this backend's prepared
+            # client but request no EF so the old documents can be copied
+            # without embedding or interpreting them during extraction.
+            col = backend._client(palace_path).get_collection(
+                collection_name, embedding_function=None
+            )
+        else:
+            col = backend.get_collection(palace_path, collection_name)
         total = col.count()
     except Exception as e:
         progress(f"  Error reading palace: {e}")
@@ -1712,6 +1940,7 @@ def _rebuild_index_under_lease(
             batch_size,
             collection_name=collection_name,
             progress=progress,
+            embeddinggemma2=embeddinggemma2,
         )
     except RebuildCollectionError as e:
         progress(f"\n  ERROR during rebuild: {e}")
@@ -1736,6 +1965,7 @@ def _rebuild_index_under_lease(
                     len(all_ids),
                     batch_size,
                     progress=progress,
+                    embeddinggemma2=embeddinggemma2,
                 )
                 progress(
                     "  Recovery succeeded: live collection restored from the verified temp copy."
@@ -1845,19 +2075,30 @@ def _rebuild_one_collection(
     ids: list[str] = []
     docs: list[str] = []
     metas: list[dict] = []
+    embeddings: list[list[float]] = []
     upserted = 0
     col = None
+    from .config import MempalaceConfig
+    from .palace import ASSETS_COLLECTION_NAME
+
+    media_assets = collection_name == ASSETS_COLLECTION_NAME
+    embeddinggemma2 = MempalaceConfig().embedding_model == "embeddinggemma2"
+    asset_embedder = None
 
     def _flush() -> int:
         nonlocal upserted
         if not ids:
             return upserted
-        col.upsert(ids=list(ids), documents=list(docs), metadatas=list(metas))
+        kwargs = {"ids": list(ids), "documents": list(docs), "metadatas": list(metas)}
+        if media_assets:
+            kwargs["embeddings"] = list(embeddings)
+        col.upsert(**kwargs)
         upserted += len(ids)
         print(f"    upserted {upserted}")
         ids.clear()
         docs.clear()
         metas.clear()
+        embeddings.clear()
         return upserted
 
     try:
@@ -1867,7 +2108,11 @@ def _rebuild_one_collection(
         # reported as a structured ``RebuildPartialError`` carrying
         # ``archive_path`` — instead of an unstructured exception that
         # strands the user without recovery instructions.
+        if media_assets:
+            asset_embedder = _asset_media_embedder()
         col = backend.create_collection(dest_palace, collection_name)
+        if not media_assets:
+            col = _embeddinggemma2_collection(col, embeddinggemma2)
 
         for emb_id, doc, meta in extract_via_sqlite(source_palace, collection_name):
             ids.append(emb_id)
@@ -1879,10 +2124,28 @@ def _rebuild_one_collection(
             # embedding_metadata could yield an emb_id with no rows.
             # Coerce to a sentinel that satisfies validation and is
             # discoverable later via `where={"_repaired_empty_meta": True}`.
-            metas.append(meta if (meta and len(meta) > 0) else {"_repaired_empty_meta": True})
+            stored_meta = meta if (meta and len(meta) > 0) else {"_repaired_empty_meta": True}
+            if media_assets:
+                vectors, refreshed = _embed_asset_rows(asset_embedder, ([doc or ""], [stored_meta]))
+                embeddings.extend(vectors)
+                stored_meta = refreshed[0]
+            metas.append(stored_meta)
             if len(ids) >= batch_size:
                 _flush()
         _flush()
+        if (embeddinggemma2 or media_assets) and upserted:
+            _verify_collection_count(col, upserted, "SQLite rebuilt collection")
+        # Record the model that re-embedded the rows, for every collection,
+        # once the rebuilt count matches what was upserted (#2709). Elsewhere
+        # a mismatch is not fatal, as before; the collection is then left
+        # unrecorded and the next open warns.
+        if col.count() == upserted:
+            _record_rebuilt_embedder_identity(col, dest_palace)
+        else:
+            print(
+                f"    {collection_name}: {col.count()} rows after {upserted} upserts; "
+                "embedder identity not recorded"
+            )
     except Exception as exc:  # noqa: BLE001 — chromadb raises many shapes
         partial = dict(counts_so_far)
         partial[collection_name] = upserted
@@ -1997,43 +2260,47 @@ def extract_via_sqlite(palace_path: str, collection_name: str) -> Iterator[tuple
         for emb_id in order:
             kv = per_id[emb_id]
             doc = kv.pop("chroma:document", "")
-            yield emb_id, doc, kv
+            # Yield what a caller wrote, not the stored escape, so a re-add
+            # embeds and encodes the real text.
+            yield (emb_id, *decode_record(doc, kv))
     finally:
         conn.close()
 
 
+def _copy_sqlite_db(src: str, dst: str) -> None:
+    """Copy a SQLite database through the backup API.
+
+    A live writer's WAL is folded into one consistent file, where copying
+    the main file and its ``-wal``/``-shm`` one by one can tear. A file
+    SQLite cannot read is copied as bytes.
+    """
+    try:
+        with closing(connect_sqlite_read(src)) as source, closing(sqlite3.connect(dst)) as dest:
+            source.backup(dest)
+    except sqlite3.DatabaseError:
+        _copy_file_no_follow(src, dst, replace=True)
+
+
 def _preserve_knowledge_graph_sqlite(source_palace: str, dest_palace: str) -> list[str]:
-    """Copy KG SQLite sidecars when rebuilding a palace from chroma.sqlite3.
+    """Copy the KG database when rebuilding a palace from chroma.sqlite3.
 
     rebuild_from_sqlite reconstructs Chroma collections into a fresh
     destination directory. The knowledge graph is a separate SQLite database,
     so it must be copied explicitly or the repair succeeds while silently
     dropping KG state (#1816).
     """
+    filename = "knowledge_graph.sqlite3"
+    src = os.path.join(source_palace, filename)
+    dst = os.path.join(dest_palace, filename)
+    if os.path.islink(src) or not os.path.isfile(src):
+        return []
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return []
 
-    copied: list[str] = []
-
-    for suffix in ("", "-wal", "-shm"):
-        filename = f"knowledge_graph.sqlite3{suffix}"
-        src = os.path.join(source_palace, filename)
-        dst = os.path.join(dest_palace, filename)
-
-        if not os.path.isfile(src):
-            continue
-        if os.path.abspath(src) == os.path.abspath(dst):
-            continue
-
-        os.makedirs(dest_palace, exist_ok=True)
-        try:
-            _copy_file_no_follow(src, dst, replace=True)
-        except RuntimeError:
-            continue
-        copied.append(filename)
-
-    if copied:
-        print(" Preserved knowledge graph: " + ", ".join(copied))
-
-    return copied
+    os.makedirs(dest_palace, exist_ok=True)
+    _copy_sqlite_db(src, dst)
+    print(" Preserved knowledge graph: " + filename)
+    return [filename]
 
 
 def rebuild_from_sqlite(
@@ -2059,11 +2326,10 @@ def rebuild_from_sqlite(
     :func:`extract_via_sqlite`.
 
     Re-embeds documents at upsert time using the configured embedding
-    function; the original HNSW vectors are not preserved (they live in
-    the corrupt ``data_level0.bin`` / ``link_lists.bin``, not in
-    SQLite). Acceptable for a corruption-recovery flow because the
-    embedding model is deterministic — same model + same document text
-    yields semantically equivalent search results.
+    function and media assets from their local source files using the
+    provider's native media encoder. Original HNSW vectors are not preserved
+    (they live in the corrupt ``data_level0.bin`` / ``link_lists.bin``, not in
+    SQLite).
 
     ``archive_existing_dest`` controls behavior when ``dest_palace``
     already exists:
@@ -2129,6 +2395,8 @@ def rebuild_from_sqlite(
     """
     source_palace = os.path.abspath(os.path.expanduser(source_palace))
     dest_palace = os.path.abspath(os.path.expanduser(dest_palace))
+    if not dry_run:
+        _require_valid_embedding_model()
 
     src_db = os.path.join(source_palace, "chroma.sqlite3")
 
@@ -2240,7 +2508,7 @@ def _preview_rebuild_from_sqlite(
         print(f"  Would rebuild into {dest_palace} from {source_palace}.")
 
     counts: dict[str, int] = {}
-    for cname in _recoverable_collections():
+    for cname in _recoverable_collections(source_palace):
         n = sqlite_drawer_count(source_palace, cname)
         if n is None:
             _print_unreadable_count_refusal(collection_name=cname, palace_path=source_palace)
@@ -2392,6 +2660,16 @@ def _rebuild_from_sqlite_locked(
     before this body runs, so a held lock never reaches the archive.
     """
     archive_path: Optional[str] = None
+    try:
+        # Full recovery can archive the source in-place. Validate every asset
+        # reference before that rename so an absent local file never strands
+        # the original palace or produces a silently incomplete replacement.
+        _preflight_asset_files(source_palace)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"\n  Cannot safely rebuild media assets: {exc}")
+        print("  Restore the referenced local media file and retry; the palace was left untouched.")
+        return {}
+
     if in_place:
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         archive_path = f"{dest_palace}.pre-rebuild-{ts}"
@@ -2449,7 +2727,7 @@ def _rebuild_from_sqlite_locked(
     backend = ChromaBackend()
     counts: dict[str, int] = {}
     try:
-        for cname in _recoverable_collections():
+        for cname in _recoverable_collections(source_palace):
             print(f"\n  [{cname}]")
             upserted = _rebuild_one_collection(
                 backend=backend,
@@ -2798,6 +3076,7 @@ def repair_max_seq_id(
     backup: bool = True,
     dry_run: bool = False,
     assume_yes: bool = False,
+    progress: Callable[[str], None] = print,
 ) -> dict:
     """Un-poison ``max_seq_id`` rows corrupted by ``_fix_blob_seq_ids`` misfire.
 
@@ -2809,6 +3088,11 @@ def repair_max_seq_id(
     restores clean values either from a pre-corruption sidecar DB
     (exact) or heuristically (``MAX(embeddings.seq_id)`` over the owning
     collection).
+
+    The write runs under the palace writer lease, so it cannot interleave
+    with a mine or an MCP writer, and the plan is recomputed once the lease
+    is held. When another writer holds the palace nothing changes and the
+    result carries ``reason="writer-active"``.
     """
     from .migrate import confirm_destructive_action, contains_palace_database
 
@@ -2825,73 +3109,129 @@ def repair_max_seq_id(
         "backup": None,
     }
 
-    print(f"\n{'=' * 55}")
-    print("  MemPalace Repair -- max_seq_id Un-poison")
-    print(f"{'=' * 55}\n")
-    print(f"  Palace:  {palace_path}")
+    progress(f"\n{'=' * 55}")
+    progress("  MemPalace Repair -- max_seq_id Un-poison")
+    progress(f"{'=' * 55}\n")
+    progress(f"  Palace:  {palace_path}")
     if segment:
-        print(f"  Segment: {segment}")
+        progress(f"  Segment: {segment}")
     if from_sidecar:
-        print(f"  Sidecar: {from_sidecar}")
+        progress(f"  Sidecar: {from_sidecar}")
 
     if not os.path.isdir(palace_path):
-        print(f"  No palace found at {palace_path}")
+        progress(f"  No palace found at {palace_path}")
         result["aborted"] = True
         result["reason"] = "palace-missing"
         return result
     if not contains_palace_database(palace_path):
-        print(f"  No palace database at {palace_path}")
+        progress(f"  No palace database at {palace_path}")
         result["aborted"] = True
         result["reason"] = "db-missing"
         return result
 
-    poisoned = _detect_poisoned_max_seq_ids(db_path, segment=segment, threshold=threshold)
+    sidecar_map = _read_sidecar_seq_ids(from_sidecar) if from_sidecar else None
+    plan_args = {"segment": segment, "threshold": threshold, "sidecar_map": sidecar_map}
+    poisoned, plan = _plan_max_seq_id_repair(db_path, progress=progress, **plan_args)
     if not poisoned:
-        print("  No poisoned max_seq_id rows detected. Nothing to do.")
-        print(f"\n{'=' * 55}\n")
+        progress("  No poisoned max_seq_id rows detected. Nothing to do.")
+        progress(f"\n{'=' * 55}\n")
         return result
+    result["before"] = {seg_id: old for seg_id, old, _new in plan}
+    result["after"] = {seg_id: new for seg_id, _old, new in plan}
 
-    sidecar_map: dict[str, int] = {}
-    if from_sidecar:
-        sidecar_map = _read_sidecar_seq_ids(from_sidecar)
-
-    plan: list[tuple[str, int, int]] = []
-    with open_palace_writer(db_path) as conn:
-        cur = conn.cursor()
-        for seg_id, old_val in poisoned:
-            if from_sidecar:
-                if seg_id not in sidecar_map:
-                    print(f"  Skipped segment {seg_id}: no sidecar entry")
-                    continue
-                new_val = sidecar_map[seg_id]
-            else:
-                new_val = _compute_heuristic_seq_id(cur, seg_id)
-            plan.append((seg_id, old_val, new_val))
-            result["before"][seg_id] = old_val
-            result["after"][seg_id] = new_val
-
-    print()
-    print("  Report")
-    print(f"    poisoned rows        {len(poisoned):>6}")
-    print(f"    planned repairs      {len(plan):>6}")
+    progress("")
+    progress("  Report")
+    progress(f"    poisoned rows        {len(poisoned):>6}")
+    progress(f"    planned repairs      {len(plan):>6}")
     source = "sidecar" if from_sidecar else "heuristic (collection MAX)"
-    print(f"    clean-value source   {source}")
+    progress(f"    clean-value source   {source}")
     for seg_id, old_val, new_val in plan:
-        print(f"    {seg_id}  {old_val}  ->  {new_val}")
+        progress(f"    {seg_id}  {old_val}  ->  {new_val}")
 
     if dry_run:
-        print("\n  DRY RUN -- no rows modified.\n" + "=" * 55 + "\n")
+        progress("\n  DRY RUN -- no rows modified.\n" + "=" * 55 + "\n")
         return result
 
     if not plan:
-        print("  No actionable repairs.")
-        print(f"\n{'=' * 55}\n")
+        progress("  No actionable repairs.")
+        progress(f"\n{'=' * 55}\n")
         return result
 
     if not confirm_destructive_action("Repair max_seq_id", palace_path, assume_yes=assume_yes):
         result["aborted"] = True
         result["reason"] = "user-aborted"
         return result
+
+    from .palace import MineAlreadyRunning, mine_palace_lock
+
+    try:
+        with mine_palace_lock(palace_path):
+            _apply_max_seq_id_plan(palace_path, db_path, plan_args, backup, result, progress)
+    except MineAlreadyRunning as exc:
+        progress(f"\n  Another writer already holds this palace: {exc}")
+        progress("  Stop mines and MCP writers on it, then re-run; nothing changed.")
+        result["aborted"] = True
+        result["reason"] = "writer-active"
+        return result
+
+    if result["segment_repaired"]:
+        progress(f"\n  Repair complete. {len(result['segment_repaired'])} row(s) restored.")
+        progress(f"  Backup:  {result['backup'] or '(skipped)'}")
+    else:
+        progress("  No poisoned max_seq_id rows were left once the palace was locked.")
+    progress(f"\n{'=' * 55}\n")
+    return result
+
+
+def _plan_max_seq_id_repair(
+    db_path: str,
+    *,
+    segment: Optional[str],
+    threshold: int,
+    sidecar_map: Optional[dict[str, int]],
+    progress: Callable[[str], None],
+) -> tuple[list[tuple[str, int]], list[tuple[str, int, int]]]:
+    """Return the poisoned rows and the ``(segment, old, new)`` repairs for them."""
+    poisoned = _detect_poisoned_max_seq_ids(db_path, segment=segment, threshold=threshold)
+    plan: list[tuple[str, int, int]] = []
+    if not poisoned:
+        return poisoned, plan
+    with open_palace_writer(db_path) as conn:
+        cur = conn.cursor()
+        for seg_id, old_val in poisoned:
+            if sidecar_map is not None:
+                if seg_id not in sidecar_map:
+                    progress(f"  Skipped segment {seg_id}: no sidecar entry")
+                    continue
+                new_val = sidecar_map[seg_id]
+            else:
+                new_val = _compute_heuristic_seq_id(cur, seg_id)
+            plan.append((seg_id, old_val, new_val))
+    return poisoned, plan
+
+
+def _apply_max_seq_id_plan(
+    palace_path: str,
+    db_path: str,
+    plan_args: dict,
+    backup: bool,
+    result: dict,
+    progress: Callable[[str], None],
+) -> None:
+    """Back up, rewrite and verify ``max_seq_id``; the caller holds the lease."""
+    _poisoned, plan = _plan_max_seq_id_repair(db_path, progress=lambda _msg: None, **plan_args)
+    before = {seg_id: old for seg_id, old, _new in plan}
+    after = {seg_id: new for seg_id, _old, new in plan}
+    if (before, after) != (result["before"], result["after"]):
+        # Another writer moved the palace between the report and the lease.
+        result["plan_changed"] = True
+        if plan:
+            progress("  The plan changed once the palace was locked; applying:")
+            for seg_id, old_val, new_val in plan:
+                progress(f"    {seg_id}  {old_val}  ->  {new_val}")
+    result["before"], result["after"] = before, after
+    if not plan:
+        return
 
     if backup:
         import glob
@@ -2901,9 +3241,10 @@ def repair_max_seq_id(
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_path = os.path.join(palace_path, f"chroma.sqlite3.max-seq-id-backup-{timestamp}")
-        shutil.copy2(db_path, backup_path)
+        # Through the backup API, so a writer's uncheckpointed WAL is in it.
+        _copy_sqlite_db(db_path, backup_path)
         result["backup"] = backup_path
-        print(f"  Backup:  {backup_path}")
+        progress(f"  Backup:  {backup_path}")
 
         # Retain only the most recent N backups (the copy just written is the
         # newest and is kept). Without this, every max-seq-id repair leaves a
@@ -2911,7 +3252,7 @@ def repair_max_seq_id(
         prune_backups(
             os.path.join(glob.escape(palace_path), "chroma.sqlite3.max-seq-id-backup-*"),
             MempalaceConfig().max_backups,
-            log=print,
+            log=progress,
         )
 
     _close_chroma_handles(palace_path)
@@ -2928,18 +3269,15 @@ def repair_max_seq_id(
             conn.rollback()
             raise
 
-    remaining = _detect_poisoned_max_seq_ids(db_path, segment=segment, threshold=threshold)
+    remaining = _detect_poisoned_max_seq_ids(
+        db_path, segment=plan_args["segment"], threshold=plan_args["threshold"]
+    )
     if remaining:
         raise MaxSeqIdVerificationError(
             f"Post-repair detection still found {len(remaining)} poisoned row(s): "
             f"{[sid for sid, _ in remaining]}. Backup at {result['backup']}."
         )
-
     result["segment_repaired"] = [seg_id for seg_id, _old, _new in plan]
-    print(f"\n  Repair complete. {len(plan)} row(s) restored.")
-    print(f"  Backup:  {result['backup'] or '(skipped)'}")
-    print(f"\n{'=' * 55}\n")
-    return result
 
 
 if __name__ == "__main__":

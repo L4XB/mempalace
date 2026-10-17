@@ -4,7 +4,6 @@ from unittest.mock import Mock
 
 import chromadb
 import pytest
-
 from _mcp_server_helpers import _patch_mcp_server
 
 

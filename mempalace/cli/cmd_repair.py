@@ -12,7 +12,8 @@ def cmd_palace_set_embedder(args):
     ``MEMPALACE_EMBEDDING_MODEL``. ``--force`` overwrites an existing,
     differently-named identity.
     """
-    from ..backends.base import EmbedderIdentityMismatchError
+    from ..backends.base import EmbedderIdentityMismatchError, EmbedderIdentityRecordError
+    from ..embedding import UnknownEmbeddingModelError
     from ..palace import set_palace_embedder_identity
 
     config = MempalaceConfig()
@@ -27,7 +28,13 @@ def cmd_palace_set_embedder(args):
             force=getattr(args, "force", False),
             backend=_backend_arg(args),
         )
-    except EmbedderIdentityMismatchError as exc:
+    except (
+        EmbedderIdentityMismatchError,
+        EmbedderIdentityRecordError,
+        UnknownEmbeddingModelError,
+    ) as exc:
+        # A misspelled --model (or configured model) is refused before the
+        # palace is opened, so nothing was created.
         print(f"  ✗ {exc}")
         raise SystemExit(2) from exc
     if old is None:
@@ -185,6 +192,12 @@ def _legacy_repair_after_prompt(backend, palace_path, collection_name, args):
         raise SystemExit(2) from exc
 
 
+def _exit_if_writer_active(result) -> None:
+    """Exit 2, like the other repair modes, when another writer held the palace."""
+    if result.get("reason") == "writer-active":
+        raise SystemExit(2)
+
+
 def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata.
 
@@ -201,8 +214,8 @@ def cmd_repair(args):
         raise SystemExit(2)
 
     from ..backends.chroma import ChromaBackend
-    from ..palace import MineAlreadyRunning, mine_palace_lock
     from ..migrate import confirm_destructive_action, contains_palace_database
+    from ..palace import MineAlreadyRunning, mine_palace_lock
     from ..repair import (
         _preview_legacy_repair,
         index_read_recovery_guidance,
@@ -219,7 +232,7 @@ def cmd_repair(args):
     if getattr(args, "mode", "legacy") == "max-seq-id":
         from ..repair import repair_max_seq_id
 
-        repair_max_seq_id(
+        result = repair_max_seq_id(
             palace_path,
             segment=getattr(args, "segment", None),
             from_sidecar=getattr(args, "from_sidecar", None),
@@ -227,11 +240,20 @@ def cmd_repair(args):
             dry_run=getattr(args, "dry_run", False),
             assume_yes=getattr(args, "yes", False),
         )
+        _exit_if_writer_active(result)
         return
+
+    if not getattr(args, "dry_run", False):
+        _exit_on_misspelled_embedding_model()
 
     if getattr(args, "mode", "legacy") == "from-sqlite":
         from ..migrate import confirm_destructive_action
-        from ..repair import RebuildCleanupError, RebuildPartialError, rebuild_from_sqlite
+        from ..repair import (
+            RebuildCleanupError,
+            RebuildPartialError,
+            move_aaak_after_rebuild,
+            rebuild_from_sqlite,
+        )
 
         source_path = getattr(args, "source", None)
         source_path = (
@@ -294,6 +316,7 @@ def cmd_repair(args):
         # a populated dict with 0-valued counts).
         if not counts:
             sys.exit(1)
+        move_aaak_after_rebuild(palace_path, dry_run=dry_run)
         return
 
     db_path = os.path.join(palace_path, "chroma.sqlite3")
@@ -330,6 +353,7 @@ def cmd_repair(args):
         assume_yes=getattr(args, "yes", False),
     )
     if preflight is not None:
+        _exit_if_writer_active(preflight)
         return
 
     print(f"\n{'=' * 55}")

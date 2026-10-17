@@ -166,6 +166,7 @@ def test_native_format_detection_is_sqlite_only(tmp_path, monkeypatch):
 @pytest.mark.parametrize("count", [31, 10001])
 def test_native_matches_python_ranking_and_filters(native_backend, count):
     import numpy as np
+
     from mempalace.backends.sqlite_exact import SQLiteExactBackend
 
     backend, palace = native_backend

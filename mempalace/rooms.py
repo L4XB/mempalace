@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Optional, Protocol
 
 from .config import MempalaceConfig, sanitize_name
+from .metadata_types import is_bookkeeping
 
 ROOM_SET_SCHEMA_VERSION = 1
 DEFAULT_SAMPLE_SIZE = 60
@@ -183,7 +184,7 @@ def _iter_wing_rows(col, wing: str, include: list[str]) -> Iterable[dict]:
         embs = list(embs) if embs is not None else [None] * len(ids)
         for i, row_id in enumerate(ids):
             meta = metas[i] or {}
-            if meta.get("wing") != wing or meta.get("is_sentinel"):
+            if meta.get("wing") != wing or is_bookkeeping(meta):
                 continue
             yield {"id": row_id, "metadata": meta, "document": docs[i], "embedding": embs[i]}
         offset += len(ids)
@@ -824,6 +825,16 @@ def save_pending_apply(
     return path
 
 
+def _unique_json_members(pairs):
+    """Recovery journals must not silently discard duplicate object members."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate member in pending room apply: {key!r}")
+        result[key] = value
+    return result
+
+
 def load_pending_apply(
     config: MempalaceConfig, wing: str
 ) -> Optional[tuple[dict, int, Optional[dict], Optional[dict]]]:
@@ -839,11 +850,18 @@ def load_pending_apply(
     if not os.path.isfile(path):
         return None
     with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+        data = json.load(f, object_pairs_hook=_unique_json_members)
     targets = {}
-    for row in data.get("closets") or []:
-        if isinstance(row, list) and len(row) == 3 and all(isinstance(x, str) for x in row):
-            targets[(row[0], row[1])] = row[2]
+    rows = data.get("closets", [])
+    if not isinstance(rows, list):
+        raise ValueError("pending room apply has invalid closets")
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 3 or not all(isinstance(x, str) for x in row):
+            raise ValueError("pending room apply has invalid closet row")
+        key = (row[0], row[1])
+        if key in targets:
+            raise ValueError("pending room apply has duplicate closet target")
+        targets[key] = row[2]
     inputs = data.get("inputs")
     if "closet_moves" not in data:
         if any(
@@ -870,8 +888,6 @@ def load_pending_apply(
         or not all(isinstance(x, str) for x in entry)
         for cid, entry in moves.items()
     ):
-        raise ValueError("pending room apply has invalid closet moves")
-    if len(moves) != len(set(moves)):
         raise ValueError("pending room apply has invalid closet moves")
     if any(targets.get((source, old)) != target for source, old, target in moves.values()):
         raise ValueError("pending closet moves conflict with room apply targets")

@@ -3,8 +3,7 @@ import uuid
 
 import numpy as np
 import pytest
-
-from _backend_conformance import assert_partition_isolation
+from _backend_conformance import assert_partition_isolation, assert_update_skips_missing_ids
 from _chroma_palace_helper import make_minimal_chroma_sqlite
 
 from mempalace.backends import (
@@ -457,7 +456,7 @@ def test_palace_wrapper_embeds_for_qdrant(tmp_path, monkeypatch, fake_qdrant):
     from mempalace import palace
 
     monkeypatch.setattr(
-        embedding_wrapper, "_embed_texts", lambda texts: [[1.0, 0.0] for _ in texts]
+        embedding_wrapper, "_embed_texts", lambda texts, **_kwargs: [[1.0, 0.0] for _ in texts]
     )
     monkeypatch.setenv("MEMPALACE_BACKEND_EXPLICIT", "qdrant")
     monkeypatch.setenv("MEMPALACE_BACKEND", "qdrant")
@@ -487,6 +486,13 @@ def test_qdrant_cross_palace_isolation_conformance(tmp_path, fake_qdrant):
         ref = PalaceRef(id=str(path), local_path=str(path))
         cols.append(backend.get_collection(palace=ref, collection_name="drawers", create=True))
     assert_partition_isolation(backend, cols[0], cols[1], embedding=[1.0, 0.0])
+
+
+def test_qdrant_update_skips_missing_ids_conformance(tmp_path, fake_qdrant):
+    backend = QdrantBackend()
+    ref = PalaceRef(id=str(tmp_path), local_path=str(tmp_path))
+    col = backend.get_collection(palace=ref, collection_name="drawers", create=True)
+    assert_update_skips_missing_ids(backend, col, embedding=[1.0, 0.0])
 
 
 def test_qdrant_namespace_isolation_conformance(tmp_path, fake_qdrant):

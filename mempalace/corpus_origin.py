@@ -36,9 +36,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Optional
-
 
 # ── Well-known AI brand terms (expand as new platforms emerge) ────────────
 # Detection is by PATTERN + CONTEXT, not by capitalization or English-language

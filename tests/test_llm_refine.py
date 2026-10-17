@@ -5,7 +5,6 @@ Uses a fake provider for deterministic, offline tests. No network.
 
 from dataclasses import dataclass
 
-
 from mempalace.llm_client import LLMError, LLMResponse
 from mempalace.llm_refine import (
     _apply_classifications,
@@ -18,7 +17,6 @@ from mempalace.llm_refine import (
     collect_corpus_text,
     refine_entities,
 )
-
 
 # ── fake provider ───────────────────────────────────────────────────────
 

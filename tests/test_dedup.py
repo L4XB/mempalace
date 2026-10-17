@@ -2,9 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-
 from mempalace import dedup
-
 
 # ── get_source_groups ─────────────────────────────────────────────────
 

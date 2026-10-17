@@ -10,9 +10,11 @@ import pickle
 import re
 import shlex
 import sqlite3
-import weakref
 import struct
+import threading
 import time
+import warnings
+import weakref
 from collections import defaultdict
 from numbers import Integral
 from pathlib import Path
@@ -22,15 +24,27 @@ import chromadb
 from chromadb.config import Settings as _ChromaSettings
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
-from ._inproc_sqlite import open_reader as open_palace_reader
-from ._inproc_sqlite import open_writer as open_palace_writer
-from ._inproc_sqlite import palace_db_lock
+from ..stored_text import (
+    FLAG,
+    decode_record,
+    decode_value,
+    encode_filter,
+    encode_where,
+    prepare_stored_write,
+    restore_rows,
+)
+from ._inproc_sqlite import (
+    open_reader as open_palace_reader,
+    open_writer as open_palace_writer,
+    palace_db_lock,
+)
 from ._magic import has_sqlite_magic
 from ._sidecar import EMBEDDER_SIDECAR_FILENAME, read_embedder_sidecar, write_embedder_sidecar
 from .base import (
     BaseBackend,
     BaseCollection,
     CollectionNotInitializedError,
+    EmbeddingFunctionMismatchError,
     GetResult,
     HealthStatus,
     LexicalHit,
@@ -44,6 +58,31 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MetadataRecoveryPending(sqlite3.OperationalError):
+    """The persisted metadata projection needs the normal Chroma recovery path."""
+
+
+# chromadb persists EmbeddingGemma 2's EF config on the collection and, on
+# every later open, tries to rebuild it from its own registry, which does not
+# know "embeddinggemma2": it warns "Could not reconstruct embedding function
+# embeddinggemma2 ... Setting to None" and drops the rebuilt function. That
+# is harmless here (MemPalace always passes its own function or caller
+# vectors and checks the recorded identity), so silence exactly that warning.
+# Registering the class instead would let chromadb build and embed with a
+# function from the persisted config whenever none is passed, which is the
+# kind of silent fallback the backend refuses.
+def _ignore_embeddinggemma2_reconstruct_warning() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Could not reconstruct embedding function embeddinggemma2: ",
+        category=UserWarning,
+        module=r"chromadb(\.|$)",
+    )
+
+
+_ignore_embeddinggemma2_reconstruct_warning()
 
 
 # ChromaDB's own default is ``anonymized_telemetry=True``. In the 1.x line we
@@ -2238,8 +2277,9 @@ def _sqlite_wing_room_counts(
                 is None
             ):
                 return None
+            # Registry rows and sentinels track sources; they are not drawers.
             rows = conn.execute(
-                """
+                f"""
                 SELECT COALESCE(wm.string_value, CAST(wm.int_value AS TEXT),
                                 CAST(wm.float_value AS TEXT), '?') AS wing,
                        COALESCE(rm.string_value, CAST(rm.int_value AS TEXT),
@@ -2250,7 +2290,7 @@ def _sqlite_wing_room_counts(
                 JOIN collections c ON s.collection = c.id
                 LEFT JOIN embedding_metadata wm ON wm.id = e.id AND wm.key = 'wing'
                 LEFT JOIN embedding_metadata rm ON rm.id = e.id AND rm.key = 'room'
-                WHERE c.name = ?
+                WHERE c.name = ? AND {not_bookkeeping_sql(conn)}
                 GROUP BY wing, room
                 """,
                 (collection_name,),
@@ -2263,7 +2303,7 @@ def _sqlite_wing_room_counts(
     total = 0
     wing_rooms: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for wing, room, n in rows:
-        wing_rooms[wing][room] += int(n)
+        wing_rooms[decode_value(wing)][decode_value(room)] += int(n)
         total += int(n)
     return total, wing_rooms
 
@@ -2290,7 +2330,7 @@ def sqlite_room_wing_hall_counts(palace_path: str, collection_name: str) -> Opti
                 is None
             ):
                 return None
-            return conn.execute(
+            rows = conn.execute(
                 """
                 SELECT
                     COALESCE(rm.string_value, CAST(rm.int_value AS TEXT),
@@ -2317,6 +2357,10 @@ def sqlite_room_wing_hall_counts(palace_path: str, collection_name: str) -> Opti
             conn.close()
     except sqlite3.Error:
         return None
+    return [
+        (decode_value(room), decode_value(wing), decode_value(hall), n, decode_value(last))
+        for room, wing, hall, n, last in rows
+    ]
 
 
 def _sqlite_iter_metadata(
@@ -2324,6 +2368,7 @@ def _sqlite_iter_metadata(
     collection_name: str,
     keys: Optional[Iterable[str]],
     require_key: Optional[str],
+    equals: Optional[dict] = None,
 ) -> Iterator[Optional[dict]]:
     """Stream each drawer's metadata from an open chroma.sqlite3 connection, in row order.
 
@@ -2331,9 +2376,12 @@ def _sqlite_iter_metadata(
     them is skipped. With ``keys=None``, every non-internal key is read and a
     drawer without metadata yields ``None``, the way Chroma's ``get`` returns
     it. ``require_key`` limits the scan to drawers holding a string value
-    under that key, found through the ``(key, string_value)`` index. Chroma's
-    own paging is a SQL ``OFFSET``, which re-walks every skipped row, so a
-    full pass that way is quadratic in the number of drawers.
+    under that key, found through the ``(key, string_value)`` index.
+    ``equals`` limits it further to drawers whose string value under each key
+    equals the given one, through the same index, so a pass over one wing
+    reads that wing's rows rather than the whole collection. Chroma's own
+    paging is a SQL ``OFFSET``, which re-walks every skipped row, so a full
+    pass that way is quadratic in the number of drawers.
     """
     scope = """
         SELECT e.id FROM embeddings e
@@ -2346,6 +2394,10 @@ def _sqlite_iter_metadata(
         scope += """ AND e.id IN (SELECT r.id FROM embedding_metadata r
                      WHERE r.key = ? AND r.string_value IS NOT NULL)"""
         params.append(require_key)
+    for key, value in (equals or {}).items():
+        scope += """ AND e.id IN (SELECT r.id FROM embedding_metadata r
+                     WHERE r.key = ? AND r.string_value = ?)"""
+        params.extend((key, encode_filter(value)))
     # Older chromadb schemas lack bool_value; select NULL for any value
     # column the table does not have so the row shape stays fixed.
     present = set(_metadata_value_columns(conn))
@@ -2354,7 +2406,8 @@ def _sqlite_iter_metadata(
         for col in ("string_value", "int_value", "float_value", "bool_value")
     )
     if keys is not None:
-        keys = list(keys)
+        # The escape flag rides along so the caller can decode these keys.
+        keys = list(dict.fromkeys([*keys, FLAG]))
         sql = f"""
             SELECT m.id, {columns} FROM embedding_metadata m
             WHERE m.key IN ({",".join("?" * len(keys))}) AND m.id IN ({scope})
@@ -2364,7 +2417,7 @@ def _sqlite_iter_metadata(
     else:
         sql = f"""
             SELECT ids.id, {columns} FROM ({scope}) ids
-            LEFT JOIN embedding_metadata m ON m.id = ids.id AND m.key NOT LIKE 'chroma:%'
+            LEFT JOIN embedding_metadata m ON m.id = ids.id AND substr(m.key, 1, 7) != 'chroma:'
             ORDER BY ids.id
         """
         cursor = conn.execute(sql, params)
@@ -2404,7 +2457,7 @@ def sqlite_wing_source_counts(palace_path: str, collection_name: str) -> Optiona
                 is None
             ):
                 return None
-            return conn.execute(
+            rows = conn.execute(
                 """
                 SELECT
                     COALESCE(wm.string_value, '') AS wing,
@@ -2426,6 +2479,7 @@ def sqlite_wing_source_counts(palace_path: str, collection_name: str) -> Optiona
             conn.close()
     except sqlite3.Error:
         return None
+    return [(decode_value(wing), decode_value(source), n) for wing, source, n in rows]
 
 
 def _metadata_value_columns(conn) -> list[str]:
@@ -2436,6 +2490,19 @@ def _metadata_value_columns(conn) -> list[str]:
     """
     present = {row[1] for row in conn.execute("PRAGMA table_info(embedding_metadata)")}
     return [c for c in ("string_value", "int_value", "float_value", "bool_value") if c in present]
+
+
+def not_bookkeeping_sql(conn, row_id: str = "e.id") -> str:
+    """SQL predicate: the row is no registry row or sentinel (``is_bookkeeping``)."""
+    columns = _metadata_value_columns(conn)
+    flag = ["b.string_value IN ('true', 'True', '1')"]
+    flag += [f"b.{c} = 1" for c in ("int_value", "bool_value") if c in columns]
+    return (
+        "NOT EXISTS (SELECT 1 FROM embedding_metadata b"
+        f" WHERE b.id = {row_id} AND ("
+        "(b.key = 'ingest_mode' AND b.string_value = 'registry')"
+        f" OR (b.key = 'is_sentinel' AND ({' OR '.join(flag)}))))"
+    )
 
 
 def _equality_filters(where: Optional[dict]) -> Optional[dict]:
@@ -2467,10 +2534,40 @@ def _equality_filters(where: Optional[dict]) -> Optional[dict]:
     return filters
 
 
+@contextlib.contextmanager
+def sqlite_metadata_snapshot(palace_path: str, collection_name: str):
+    """A recovered metadata snapshot, or None when callers must use Chroma.
+
+    Keep this context open through page selection and document hydration. It
+    reads no documents itself and never takes a backend write lock.
+    """
+    conn = None
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    try:
+        if os.path.isfile(db_path):
+            conn = open_palace_reader(db_path)
+            conn.execute("PRAGMA busy_timeout = 3000")
+            conn.execute("BEGIN")
+            if _sqlite_ready_metadata_segment(conn, collection_name) is None:
+                conn.close()
+                conn = None
+    except sqlite3.Error:
+        if conn is not None:
+            conn.close()
+        conn = None
+    try:
+        yield conn
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def sqlite_list_id_metadata(
     palace_path: str,
     collection_name: str,
     where: Optional[dict] = None,
+    *,
+    _connection=None,
 ) -> Optional[tuple[list[str], list[dict]]]:
     """All matching drawer ids + metadata from sqlite, without opening HNSW.
 
@@ -2490,16 +2587,14 @@ def sqlite_list_id_metadata(
     filters = _equality_filters(where)
     if filters is None:
         return None
+    reader = (
+        contextlib.nullcontext(_connection)
+        if _connection is not None
+        else sqlite_metadata_snapshot(palace_path, collection_name)
+    )
     try:
-        conn = open_palace_reader(db_path)
-        try:
-            conn.execute("PRAGMA busy_timeout = 3000")
-            if (
-                conn.execute(
-                    "SELECT 1 FROM collections WHERE name = ?", (collection_name,)
-                ).fetchone()
-                is None
-            ):
+        with reader as conn:
+            if conn is None:
                 return None
             value_columns = _metadata_value_columns(conn)
             if not value_columns:
@@ -2517,7 +2612,7 @@ def sqlite_list_id_metadata(
                     f"JOIN embedding_metadata {alias} ON {alias}.id = e.id "
                     f"AND {alias}.key = ? AND {alias}.string_value = ?"
                 )
-                params.extend([key, val])
+                params.extend([key, encode_filter(val)])
             params.append(collection_name)
             rows = conn.execute(
                 f"""
@@ -2527,14 +2622,12 @@ def sqlite_list_id_metadata(
                 JOIN collections c ON s.collection = c.id
                 {" ".join(joins)}
                 LEFT JOIN embedding_metadata m
-                    ON m.id = e.id AND m.key != 'chroma:document'
+                    ON m.id = e.id AND substr(m.key, 1, 7) != 'chroma:'
                 WHERE c.name = ?
                 ORDER BY e.id
                 """,
                 params,
             ).fetchall()
-        finally:
-            conn.close()
     except sqlite3.Error:
         return None
 
@@ -2571,7 +2664,7 @@ def sqlite_list_id_metadata(
     ids: list[str] = []
     metas: list[dict] = []
     for doc_id in order:
-        meta = by_id[doc_id]
+        meta = decode_record(None, by_id[doc_id])[1]
         if any(meta.get(key) != val for key, val in filters.items()):
             continue
         ids.append(doc_id)
@@ -2583,6 +2676,8 @@ def sqlite_documents_for_ids(
     palace_path: str,
     collection_name: str,
     ids: list,
+    *,
+    _connection=None,
 ) -> Optional[dict]:
     """``{drawer_id: document}`` for ``ids`` only, straight from sqlite.
 
@@ -2603,10 +2698,15 @@ def sqlite_documents_for_ids(
         return None
     wanted = [str(i) for i in ids]
     docs: dict[str, str] = {}
+    reader = (
+        contextlib.nullcontext(_connection)
+        if _connection is not None
+        else sqlite_metadata_snapshot(palace_path, collection_name)
+    )
     try:
-        conn = open_palace_reader(db_path)
-        try:
-            conn.execute("PRAGMA busy_timeout = 3000")
+        with reader as conn:
+            if conn is None:
+                return None
             segments = [
                 row[0]
                 for row in conn.execute(
@@ -2637,16 +2737,21 @@ def sqlite_documents_for_ids(
                 public_by_internal = {int(row[0]): str(row[1]) for row in rows}
                 internal = list(public_by_internal)
                 internal_placeholders = ",".join("?" for _ in internal)
-                for internal_id, value in conn.execute(
+                flagged = set()
+                for internal_id, key, value, flag in conn.execute(
                     f"""
-                    SELECT id, string_value FROM embedding_metadata
-                    WHERE key = 'chroma:document' AND id IN ({internal_placeholders})
+                    SELECT id, key, string_value, int_value FROM embedding_metadata
+                    WHERE key IN ('chroma:document', ?) AND id IN ({internal_placeholders})
                     """,
-                    internal,
+                    [FLAG, *internal],
                 ):
-                    docs[public_by_internal[int(internal_id)]] = str(value or "")
-        finally:
-            conn.close()
+                    if key == FLAG:
+                        if flag:
+                            flagged.add(public_by_internal[int(internal_id)])
+                    else:
+                        docs[public_by_internal[int(internal_id)]] = str(value or "")
+                for drawer_id in flagged & docs.keys():
+                    docs[drawer_id] = decode_record(docs[drawer_id], {FLAG: 1})[0]
     except sqlite3.Error:
         return None
     return docs
@@ -2735,7 +2840,10 @@ def _sqlite_hydrate_rows(conn, selected, value_columns):
                 # Collection.get keeps internal fields (notably chroma:uri)
                 # out of user metadata, even when URIs were stored with rows.
                 records[row_id][2][key] = value
-    return [tuple(records[row_id]) for row_id, _ in selected]
+    return [
+        (records[row_id][0], *decode_record(records[row_id][1], records[row_id][2]))
+        for row_id, _ in selected
+    ]
 
 
 def sqlite_diary_rows(
@@ -2760,9 +2868,9 @@ def sqlite_diary_rows(
     if not os.path.isfile(db_path) or not isinstance(limit, int):
         return None
     limit = max(1, min(limit, 100))
-    equalities = [("room", "diary"), ("agent", agent_name)]
+    equalities = [("room", "diary"), ("agent", encode_filter(agent_name))]
     if wing:
-        equalities.append(("wing", wing))
+        equalities.append(("wing", encode_filter(wing)))
     try:
         conn = open_palace_reader(db_path)
         try:
@@ -3349,6 +3457,26 @@ def _clear_chroma_system_cache() -> bool:
         _clearing_system_cache = False
 
 
+# How many writes ChromaCollection instances in this process have started.
+# A mine compares it before and after to learn whether it wrote anything, and
+# skips its post-mine quick_check when it did not (#2684). Process-wide rather
+# than per palace: a write to another palace in between costs one extra check,
+# never a missed one.
+_write_serial = 0
+_write_serial_lock = threading.Lock()
+
+
+def chroma_write_serial() -> int:
+    """Number of Chroma writes (add, upsert, update, delete) started in this process."""
+    return _write_serial
+
+
+def _count_write() -> None:
+    global _write_serial
+    with _write_serial_lock:
+        _write_serial += 1
+
+
 class ChromaCollection(BaseCollection):
     """Thin adapter translating ChromaDB dict returns into typed results.
 
@@ -3368,6 +3496,8 @@ class ChromaCollection(BaseCollection):
     no-lock behaviour for callers that construct a ``ChromaCollection``
     directly without going through ``ChromaBackend``.
     """
+
+    upsert_merges_metadata = True
 
     def __init__(self, collection, palace_path: Optional[str] = None, backend=None):
         self._collection = collection
@@ -3390,7 +3520,10 @@ class ChromaCollection(BaseCollection):
         next collection open rebuilds the client, reloading every HNSW segment
         it had already paid for. That made the file-a-drawer-then-search cycle
         reload the whole index each time.
+
+        Counts the write first, so one that fails partway still counts.
         """
+        _count_write()
         if self._palace_path is None:
             yield
             return
@@ -3433,52 +3566,13 @@ class ChromaCollection(BaseCollection):
             for m in metadatas
         ]
 
-    @staticmethod
-    def _sanitize_documents_for_chromadb(documents):
-        """Strip lone UTF-16 surrogates and embedded NUL characters from every
-        document before it reaches the chromadb client.
-
-        A single lone surrogate (U+D800–U+DFFF) raises ``UnicodeEncodeError``
-        inside chromadb's encode path and aborts the *entire* add/upsert batch
-        with a ``-32000`` Internal Error, silently dropping every other row in
-        the same batch (#1235).
-
-        #1235 fixed this for the MCP write tools via ``sanitize_content``, but
-        the bulk ingest paths (miner, convo_miner, sweeper, diary_ingest) build
-        documents without routing through that helper and reach this backend
-        directly. Sanitising here makes the chokepoint catch-all complete: the
-        sibling :meth:`_sanitize_metadatas_for_chromadb` already guarantees this
-        for metadata one method over; documents get the same guarantee.
-
-        A document containing an embedded NUL (U+0000) — routine in mined
-        Bash tool output — is well-formed UTF-8, unlike a lone surrogate, but
-        can corrupt the FTS5 inverted index for the whole collection rather
-        than just failing to store that one row (a ChromaDB-side bug; tracked
-        upstream). Stripping it here is the same defense-in-depth already
-        applied to surrogates: sanitize input we don't control before it
-        reaches a datastore we don't control.
-        """
-        if documents is None:
-            return None
-        from ..config import strip_lone_surrogates, strip_nul_bytes
-
-        def _sanitize(d):
-            return strip_nul_bytes(strip_lone_surrogates(d))
-
-        # chromadb accepts OneOrMany[Document]: a bare str is a single document,
-        # not an iterable of characters. Handle it explicitly so we don't split
-        # it into per-character documents — that would be exactly the kind of
-        # silent corruption this method exists to prevent.
-        if isinstance(documents, str):
-            return _sanitize(documents)
-        return [_sanitize(d) if isinstance(d, str) else d for d in documents]
-
     def add(self, *, documents, ids, metadatas=None, embeddings=None):
         if getattr(self, "_require_embeddings", False) and embeddings is None:
             raise ValueError("caller-vector collection requires explicit embeddings")
 
+        documents, ids, metadatas = prepare_stored_write(documents, ids, metadatas)
         kwargs: dict[str, Any] = {
-            "documents": self._sanitize_documents_for_chromadb(documents),
+            "documents": documents,
             "ids": ids,
         }
         sanitized = self._sanitize_metadatas_for_chromadb(metadatas)
@@ -3489,12 +3583,30 @@ class ChromaCollection(BaseCollection):
         with self._write_lock():
             self._collection.add(**kwargs)
 
-    def upsert(self, *, documents, ids, metadatas=None, embeddings=None):
+    def _upsert_with_metadata_guard(self, *, expected, documents, ids, metadatas, embeddings):
+        """Reject metadata drift between embedding and publication.
+
+        The embedding runs before the backend lock (HTTP may yield its request
+        lock there). Cooperating MemPalace writers cannot change metadata
+        between this comparison and publication.
+        """
+        with self._write_lock():
+            result = self.get(ids=ids, include=["metadatas"])
+            current = dict(zip(result.ids, result.metadatas))
+            if current != expected:
+                raise ValueError("Metadata changed while embedding; retry the upsert")
+            kwargs = self._upsert_kwargs(
+                documents=documents, ids=ids, metadatas=metadatas, embeddings=embeddings
+            )
+            return self._collection.upsert(**kwargs)
+
+    def _upsert_kwargs(self, *, documents, ids, metadatas=None, embeddings=None):
         if getattr(self, "_require_embeddings", False) and embeddings is None:
             raise ValueError("caller-vector collection requires explicit embeddings")
 
+        documents, ids, metadatas = prepare_stored_write(documents, ids, metadatas)
         kwargs: dict[str, Any] = {
-            "documents": self._sanitize_documents_for_chromadb(documents),
+            "documents": documents,
             "ids": ids,
         }
         sanitized = self._sanitize_metadatas_for_chromadb(metadatas)
@@ -3502,10 +3614,31 @@ class ChromaCollection(BaseCollection):
             kwargs["metadatas"] = sanitized
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
+        return kwargs
+
+    def upsert(self, *, documents, ids, metadatas=None, embeddings=None):
+        kwargs = self._upsert_kwargs(
+            documents=documents, ids=ids, metadatas=metadatas, embeddings=embeddings
+        )
         with self._write_lock():
             self._collection.upsert(**kwargs)
 
-    def update(
+    def _update_with_metadata_guard(self, *, expected, ids, documents, metadatas, embeddings):
+        """Publish only if the documents and metadata used by embedding still agree."""
+        with self._write_lock():
+            result = self.get(ids=ids, include=["documents", "metadatas"])
+            current = {
+                record_id: (result.documents[index], result.metadatas[index] or {})
+                for index, record_id in enumerate(result.ids)
+            }
+            if current != expected:
+                raise ValueError("Document or metadata changed while embedding; retry the update")
+            kwargs = self._update_kwargs(
+                ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings
+            )
+            return self._collection.update(**kwargs)
+
+    def _update_kwargs(
         self,
         *,
         ids,
@@ -3522,13 +3655,20 @@ class ChromaCollection(BaseCollection):
 
         if documents is None and metadatas is None and embeddings is None:
             raise ValueError("update requires at least one of documents, metadatas, embeddings")
+        documents, ids, metadatas = prepare_stored_write(documents, ids, metadatas)
         kwargs: dict[str, Any] = {"ids": ids}
         if documents is not None:
-            kwargs["documents"] = self._sanitize_documents_for_chromadb(documents)
+            kwargs["documents"] = documents
         if metadatas is not None:
             kwargs["metadatas"] = metadatas
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
+        return kwargs
+
+    def update(self, *, ids, documents=None, metadatas=None, embeddings=None):
+        kwargs = self._update_kwargs(
+            ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings
+        )
         with self._write_lock():
             self._collection.update(**kwargs)
 
@@ -3562,7 +3702,7 @@ class ChromaCollection(BaseCollection):
         chroma_include: list[str] = []
         if spec.documents:
             chroma_include.append("documents")
-        if spec.metadatas:
+        if spec.metadatas or spec.documents:
             chroma_include.append("metadatas")
         if spec.distances:
             chroma_include.append("distances")
@@ -3578,7 +3718,7 @@ class ChromaCollection(BaseCollection):
         if query_embeddings is not None:
             kwargs["query_embeddings"] = query_embeddings
         if where is not None:
-            kwargs["where"] = where
+            kwargs["where"] = encode_where(where)
         if where_document is not None:
             kwargs["where_document"] = where_document
 
@@ -3605,10 +3745,13 @@ class ChromaCollection(BaseCollection):
         def _none_list_to_empty(outer):
             return [(inner or []) for inner in outer]
 
+        documents, metadatas = restore_rows(
+            _none_list_to_empty(documents), _none_list_to_empty(metadatas)
+        )
         return QueryResult(
             ids=_none_list_to_empty(ids),
-            documents=_none_list_to_empty(documents),
-            metadatas=_none_list_to_empty(metadatas),
+            documents=documents,
+            metadatas=metadatas if spec.metadatas else [[] for _ in ids],
             distances=_none_list_to_empty(distances),
             embeddings=(
                 [list(inner) for inner in embeddings_raw]
@@ -3634,7 +3777,7 @@ class ChromaCollection(BaseCollection):
         chroma_include: list[str] = []
         if spec.documents:
             chroma_include.append("documents")
-        if spec.metadatas:
+        if spec.metadatas or spec.documents:
             chroma_include.append("metadatas")
         if spec.embeddings:
             chroma_include.append("embeddings")
@@ -3643,7 +3786,7 @@ class ChromaCollection(BaseCollection):
         if ids is not None:
             kwargs["ids"] = ids
         if where is not None:
-            kwargs["where"] = where
+            kwargs["where"] = encode_where(where)
         if where_document is not None:
             kwargs["where_document"] = where_document
         if limit is not None:
@@ -3653,8 +3796,11 @@ class ChromaCollection(BaseCollection):
 
         raw = self._collection.get(**kwargs)
         out_ids = list(raw.get("ids") or [])
-        out_docs = list(raw.get("documents") or []) if spec.documents else []
-        out_metas = list(raw.get("metadatas") or []) if spec.metadatas else []
+        out_docs, out_metas = restore_rows(
+            list(raw.get("documents") or []), list(raw.get("metadatas") or [])
+        )
+        if not spec.metadatas:
+            out_metas = []
         out_embeds = raw.get("embeddings") if spec.embeddings else None
 
         # Pad doc/meta lists to match ids so downstream zipping is safe.
@@ -3676,7 +3822,7 @@ class ChromaCollection(BaseCollection):
         if ids is not None:
             kwargs["ids"] = ids
         if where is not None:
-            kwargs["where"] = where
+            kwargs["where"] = encode_where(where)
         with self._write_lock():
             self._collection.delete(**kwargs)
 
@@ -3684,11 +3830,15 @@ class ChromaCollection(BaseCollection):
         return self._collection.count()
 
     def iter_metadata(
-        self, keys: Optional[Iterable[str]] = None, *, require_key: Optional[str] = None
+        self,
+        keys: Optional[Iterable[str]] = None,
+        *,
+        require_key: Optional[str] = None,
+        equals: Optional[dict] = None,
     ) -> Optional[Iterator[Optional[dict]]]:
         """Stream every drawer's metadata from chroma.sqlite3 in one linear pass.
 
-        ``keys`` and ``require_key`` narrow the read (see
+        ``keys``, ``require_key`` and ``equals`` narrow the read (see
         :func:`_sqlite_iter_metadata`). Returns ``None`` when this collection
         has no palace path or no database file, so the caller can page through
         :meth:`get` instead. A read error raises from the iterator.
@@ -3703,7 +3853,16 @@ class ChromaCollection(BaseCollection):
         def rows():
             conn = open_palace_reader(db_path)
             try:
-                yield from _sqlite_iter_metadata(conn, name, keys, require_key)
+                conn.execute("BEGIN")
+                if _sqlite_ready_metadata_segment(conn, name) is None:
+                    raise MetadataRecoveryPending(
+                        "metadata recovery pending; use collection reader"
+                    )
+                for meta in _sqlite_iter_metadata(conn, name, keys, require_key, equals):
+                    meta = decode_record(None, meta)[1]
+                    if keys is not None and not meta:
+                        continue
+                    yield meta
             finally:
                 conn.close()
 
@@ -3766,17 +3925,20 @@ class ChromaCollection(BaseCollection):
                 self._palace_path,
                 self._collection.name,
                 limit=limit,
-                equalities=equalities,
+                equalities=[(key, encode_filter(value)) for key, value in equalities],
                 order_field=order_field,
             )
         if records is None:
             return super().get_recent(
                 limit=limit, where=where, order_field=order_field, include=include
             )
+        documents, metadatas = restore_rows(
+            [document for _, document, _ in records], [metadata for _, _, metadata in records]
+        )
         return GetResult(
             ids=[record_id for record_id, _, _ in records],
-            documents=[document for _, document, _ in records] if spec.documents else [],
-            metadatas=[metadata for _, _, metadata in records] if spec.metadatas else [],
+            documents=documents if spec.documents else [],
+            metadatas=metadatas if spec.metadatas else [],
             embeddings=None,
         )
 
@@ -3880,7 +4042,9 @@ class ChromaCollection(BaseCollection):
                 # If a metadata filter is present, do not cap before filtering:
                 # otherwise a common term can fill the window with wrong-scope
                 # rows and hide valid scoped hits later in the FTS result set.
-                limit_sql = "" if where else "LIMIT ?"
+                # Without a filter, rank the window so it holds the best matches
+                # rather than the first ones filed.
+                limit_sql = "" if where else "ORDER BY embedding_fulltext_search.rank LIMIT ?"
                 params = [fts_query, collection_name]
                 if not where:
                     params.append(max(max_candidates, n_results))
@@ -3992,14 +4156,14 @@ class ChromaCollection(BaseCollection):
                 drawer["metadata"][key] = value
 
         ordered = []
+        stored_where = encode_where(where)
         for emb_id in candidate_ids:
             drawer = drawers.get(emb_id)
             if drawer is None:
                 continue
-            meta = drawer["metadata"]
-            if not _matches_where(meta, where):
+            if not _matches_where(drawer["metadata"], stored_where):
                 continue
-            ordered.append((emb_id, drawer["document"], meta))
+            ordered.append((emb_id, *decode_record(drawer["document"], drawer["metadata"])))
 
         docs = [doc for _, doc, _ in ordered]
         scores = _bm25_scores(query, docs)
@@ -4132,21 +4296,39 @@ class ChromaBackend(BaseBackend):
         _LIVE_BACKENDS.add(self)
 
     @staticmethod
-    def _resolve_embedding_function():
-        """Return the EF for the user's ``embedding_device`` setting.
+    def _resolve_embedding_function(*, read_only: bool = False):
+        """Return the EF for the user's ``embedding_model`` / ``embedding_device``.
 
         Both ``get_collection`` and ``get_or_create_collection`` must receive
         the EF explicitly — ChromaDB 1.x does not persist it with the
         collection, so a reader that omits the argument silently gets the
         library default and its queries won't match the writer's vectors.
-        """
-        try:
-            from ..embedding import get_embedding_function
 
-            return get_embedding_function()
-        except Exception:
-            logger.exception("Failed to build embedding function; using chromadb default")
-            return None
+        Never returns None, so chromadb's default function is never used. A
+        configured function that fails to build raises
+        :class:`~mempalace.embedding.EmbeddingFunctionUnavailableError` (an
+        EmbeddingGemma 2 failure keeps its original error). With
+        ``read_only=True`` it returns an
+        :class:`~mempalace.embedding.UnavailableEmbeddingFunction` instead,
+        so opens that only count, list or fetch rows keep working and any
+        embed raises that error.
+        """
+        from ..embedding import (
+            EmbeddingFunctionUnavailableError,
+            UnavailableEmbeddingFunction,
+            configured_embedding_function,
+        )
+
+        # A misspelled model (UnknownEmbeddingModelError) always stops the
+        # open, not run on chromadb's default (MiniLM) function. The caller
+        # reports a refusal (CLI: one ``mempalace:`` line; MCP: the tool
+        # error plus one rate-limited log line).
+        try:
+            return configured_embedding_function()
+        except EmbeddingFunctionUnavailableError as error:
+            if read_only:
+                return UnavailableEmbeddingFunction(error)
+            raise
 
     @staticmethod
     def _explain_ef_mismatch(error: Exception, palace_path: str) -> Optional[str]:
@@ -4169,16 +4351,22 @@ class ChromaBackend(BaseBackend):
             current_model = MempalaceConfig().embedding_model
         except Exception:
             current_model = "unknown"
-        rebuild_cmd = f"mempalace --palace {shlex.quote(palace_path)} repair rebuild-index"
+        quoted = shlex.quote(palace_path)
+        rebuild_cmd = f"mempalace --palace {quoted} repair rebuild-index"
+        separate_cmd = (
+            f"mempalace --palace <new-palace> repair --mode from-sqlite --source {quoted}"
+        )
         return (
-            f"Embedding model mismatch reading palace at {palace_path!r}.\n"
+            f"Embedding model mismatch reading palace at {palace_path}.\n"
             f"  Underlying ChromaDB error: {msg}\n"
-            f"  Current MEMPALACE_EMBEDDING_MODEL={current_model!r}.\n"
+            f"  Current embedding_model={current_model!r}.\n"
             f"  The palace was built with a different embedding model. Either:\n"
-            f"    (a) revert the model: unset MEMPALACE_EMBEDDING_MODEL (or set "
-            f"the previous value), or\n"
-            f"    (b) re-embed in place: `{rebuild_cmd}` "
-            f"(writes new vectors with the current model)."
+            f"    (a) revert the model: set embedding_model (config.json or "
+            f"MEMPALACE_EMBEDDING_MODEL) back to the value the palace was built "
+            f"with, or\n"
+            f"    (b) re-embed with the current model: `{rebuild_cmd}` (in place; "
+            f"archives the original palace first) or `{separate_cmd}` (into a "
+            f"separate palace)."
         )
 
     # ------------------------------------------------------------------
@@ -4462,6 +4650,9 @@ class ChromaBackend(BaseBackend):
         palace_ref, collection_name, create, options = _normalize_get_collection_args(args, kwargs)
         self.require_namespace_support(palace_ref)
         caller_vectors = bool(options and options.get("caller_vectors", False))
+        # A read-only open must not create chroma.sqlite3 or rewrite the
+        # collection's configuration (the HNSW thread pin below is a write).
+        read_only = bool(options and options.get("read_only", False)) and not create
 
         palace_path = palace_ref.local_path
         if palace_path is None:
@@ -4469,6 +4660,20 @@ class ChromaBackend(BaseBackend):
 
         if not create and not os.path.isdir(palace_path):
             raise PalaceNotFoundError(palace_path)
+        if read_only and not os.path.isfile(os.path.join(palace_path, "chroma.sqlite3")):
+            raise PalaceNotFoundError(palace_path)
+
+        if caller_vectors:
+            # Passing None explicitly prevents Chroma's client default EF.
+            ef_kwargs = {
+                "embedding_function": None,
+            }
+        else:
+            # Before the folder is created: a configured function that cannot
+            # be built refuses a create with nothing written.
+            ef_kwargs = {
+                "embedding_function": self._resolve_embedding_function(read_only=not create),
+            }
 
         if create:
             os.makedirs(palace_path, exist_ok=True)
@@ -4480,21 +4685,6 @@ class ChromaBackend(BaseBackend):
         # Collection opens and creates write to chroma.sqlite3.
         with palace_db_lock(os.path.join(palace_path, "chroma.sqlite3")):
             client = self._client(palace_path)
-
-            if caller_vectors:
-                # Passing None explicitly prevents Chroma's client default EF.
-                ef_kwargs = {
-                    "embedding_function": None,
-                }
-            else:
-                ef = self._resolve_embedding_function()
-                ef_kwargs = (
-                    {
-                        "embedding_function": ef,
-                    }
-                    if ef is not None
-                    else {}
-                )
 
             if create:
                 try:
@@ -4515,7 +4705,7 @@ class ChromaBackend(BaseBackend):
                 except ValueError as e:
                     explanation = self._explain_ef_mismatch(e, palace_path)
                     if explanation:
-                        raise ValueError(explanation) from e
+                        raise EmbeddingFunctionMismatchError(explanation) from e
                     raise
             else:
                 try:
@@ -4525,11 +4715,11 @@ class ChromaBackend(BaseBackend):
                 except ValueError as e:
                     explanation = self._explain_ef_mismatch(e, palace_path)
                     if explanation:
-                        raise ValueError(explanation) from e
+                        raise EmbeddingFunctionMismatchError(explanation) from e
                     raise
             if caller_vectors:
                 _require_caller_vector_collection(collection)
-            else:
+            elif not read_only:
                 _pin_hnsw_threads(collection)
             # Our own client construction and collection open just wrote to
             # chroma.sqlite3; re-baseline so the next _client() call does not read
@@ -4607,8 +4797,7 @@ class ChromaBackend(BaseBackend):
         self, palace_path: str, collection_name: str, hnsw_space: str = "cosine"
     ) -> ChromaCollection:
         """Create (not get-or-create) ``collection_name`` with the given HNSW space."""
-        ef = self._resolve_embedding_function()
-        ef_kwargs = {"embedding_function": ef} if ef is not None else {}
+        ef_kwargs = {"embedding_function": self._resolve_embedding_function()}
         with palace_db_lock(os.path.join(palace_path, "chroma.sqlite3")):
             collection = self._client(palace_path).create_collection(
                 collection_name,

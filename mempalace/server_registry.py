@@ -31,6 +31,8 @@ import os
 import time
 from pathlib import Path
 
+from mempalace._proc import pid_alive as _pid_alive
+
 logger = logging.getLogger(__name__)
 
 # Bind-address wildcards: a hub bound to "all interfaces" is dialed via
@@ -51,9 +53,7 @@ def server_state_dir(palace_path: str) -> Path:
     """Per-palace state directory shared by the token and the serverinfo.
 
     Keyed by the canonical palace path so one hub per palace reuses a stable
-    directory across restarts. Must stay in sync with the token location used
-    by ``mempalace serve`` (see ``cli._server_token_path``, which delegates
-    here).
+    directory across restarts.
     """
     key = hashlib.sha256(os.path.normcase(_canonical(palace_path)).encode("utf-8")).hexdigest()[:24]
     return Path.home() / ".mempalace" / "server" / key
@@ -68,10 +68,42 @@ def serverinfo_path(palace_path: str) -> Path:
 
 
 def _read_server_token_file(palace_path: str) -> str:
+    """The stored token, or "" when it is missing, unreadable or not text."""
     try:
         return server_token_path(palace_path).read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, ValueError):
         return ""
+
+
+def load_or_create_server_token(palace_path: str) -> tuple[str, bool]:
+    """Return ``(token, created)`` for the palace's HTTP bearer token.
+
+    Reuses the stored token so it is stable across restarts, or mints one.
+    Creation runs under a cross-process lock, so hubs starting together settle
+    on one token, and an empty or garbled file left by a crash is replaced.
+    The file is published 0600 by rename, so it is never readable half-written;
+    a symlink at the path is removed first, never written through.
+    """
+    import secrets
+
+    from .fsio import atomic_write_text
+    from .palace import mine_lock
+
+    path = server_token_path(palace_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(str(path.parent), 0o700)
+    except OSError:
+        pass
+    with mine_lock(str(path)):
+        existing = _read_server_token_file(palace_path)
+        if existing:
+            return existing, False
+        token = secrets.token_urlsafe(32)
+        if path.is_symlink():
+            path.unlink()
+        atomic_write_text(path, token + "\n")
+    return token, True
 
 
 def write_serverinfo(
@@ -204,29 +236,6 @@ def clear_serverinfo(palace_path: str) -> None:
         path.unlink()
     except OSError:
         logger.debug("serverinfo cleanup failed for %s", path, exc_info=True)
-
-
-def _pid_alive(pid) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI only
-        import ctypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
 
 
 def read_live_serverinfo(palace_path: str):
