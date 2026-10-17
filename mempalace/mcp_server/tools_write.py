@@ -65,14 +65,12 @@ def _single_drawer_record(col, drawer_id: str):
 
 
 # Two write paths stamp the logical-group id under different keys:
-# ``tool_add_drawer`` chunks carry ``parent_drawer_id`` (#1539, resolved as a
-# logical drawer by #1782) while ``tool_diary_write`` chunks carry
-# ``parent_entry_id`` (#1539). Both mean the same thing -- "physical chunk of
-# this logical drawer" -- so every read path must resolve either one, or the
-# id a write path hands back is unusable with get/update/delete (#2185).
-# New diary writes stamp both keys; the read paths below still accept the
-# ``parent_entry_id``-only shape so palaces written before this fix keep
-# working with no data migration.
+# ``tool_add_drawer`` chunks carry ``parent_drawer_id`` while
+# ``tool_diary_write`` chunks carry ``parent_entry_id``. Both mean the same
+# thing -- "physical chunk of this logical drawer" -- so every read path must
+# resolve either one, or the id a write path hands back is unusable with
+# get/update/delete. New diary writes stamp both keys; the read paths below
+# still accept the ``parent_entry_id``-only shape that older palaces hold.
 _PARENT_ID_KEYS = ("parent_drawer_id", "parent_entry_id")
 
 
@@ -91,7 +89,7 @@ def _logical_parent_id(meta):
 def _logical_parent_where(drawer_id: str) -> dict:
     """Chroma ``where`` matching every chunk of ``drawer_id`` under either key.
 
-    A chunk carrying both keys (diary writes after #2185) matches both
+    A chunk carrying both keys (current diary writes) matches both
     branches of the ``$or`` but is still returned once -- Chroma dedupes by
     physical id -- so the joined content never repeats a chunk.
     """
@@ -295,7 +293,7 @@ def _fetch_drawer_rows(col, where=None, page_size: int = 1000, include=None):
     want_docs = "documents" in include
     want_meta = "metadatas" in include
 
-    # Let the backend walk its own cursor once (#2452): the offset loop below
+    # Let the backend walk its own cursor once: the offset loop below
     # is O(n^2) on backends whose get(limit=, offset=) re-scans from the start,
     # the same trap _fetch_all_metadata() avoids through get_all_metadata().
     from ..backends.base import BaseCollection
@@ -497,7 +495,7 @@ def tool_add_drawer(
     via a single batched upsert. Each chunk carries ``parent_drawer_id``
     linkage and ``chunk_index`` metadata so search can rejoin them. The
     returned ``drawer_id`` is the LOGICAL group handle on the chunked
-    path; physical drawer ids are in ``chunk_ids`` (#1539).
+    path; physical drawer ids are in ``chunk_ids``.
     ``tool_get_drawer(drawer_id)`` automatically hydrates and reassembles all
     chunks, and ``tool_delete_drawer(drawer_id)`` removes both the logical group
     and all constituent physical chunks.
@@ -543,7 +541,7 @@ def tool_add_drawer(
     if source_file:
         # A drawer filed here names a source file the same way a mined one
         # does, and ``sync`` decides both by the same rule, so it records the
-        # same directory identity (#2320). Without it this tool would file the
+        # same directory identity. Without it this tool would file the
         # one kind of drawer in a palace that sync cannot protect.
         base_meta.update(identity_metadata(source_file))
 
@@ -553,7 +551,7 @@ def tool_add_drawer(
     # (b) Chunked path: probe the LAST chunk id — its presence implies
     #     every earlier chunk also landed, since the batched upsert
     #     is all-or-nothing.
-    # (c) Legacy pre-#1539 single-row write of oversized content under
+    # (c) Legacy unchunked single-row write of oversized content under
     #     drawer_id: probe drawer_id alongside the last chunk id so a
     #     re-call with identical oversized content does not duplicate
     #     the legacy row by adding fresh chunks under different ids.
@@ -603,7 +601,7 @@ def tool_add_drawer(
         # embedding model never sees a document above ``chunk_size``.
         # Single batched ``upsert`` so the embedding pass either commits
         # every chunk or none — no half-written palace if the embedding
-        # model fails mid-loop (#1539).
+        # model fails mid-loop.
         chunk_ids: list[str] = []
         chunk_docs: list[str] = []
         chunk_metas: list[dict] = []
@@ -747,7 +745,7 @@ def _capture_fd_stdout(fn):
       ``sys.stdout`` has been swapped (e.g. under pytest capture).
     * an ``os.dup2`` of fd 1 to a temp file contains C-level banners emitted by
       onnxruntime / chromadb during embedding, which bypass ``sys.stdout``
-      entirely (the same reason the module redirects fd 1 at import, #225), and
+      entirely (the same reason the module redirects fd 1 at import), and
       keeps any direct fd-1 write off the live JSON-RPC channel.
 
     Returns ``(result, captured_text)``. ``captured_text`` is handed back to the
@@ -837,7 +835,7 @@ def tool_mine(
     """Mine a directory into the palace — the MCP equivalent of ``mempalace mine``.
 
     Lets MCP clients that cannot shell out (Claude Desktop, LM Studio, Aionui,
-    Desktop Commander) trigger indexing in-conversation (#1662). Wraps the same
+    Desktop Commander) trigger indexing in-conversation. Wraps the same
     in-process miners the CLI's ``cmd_mine`` calls; it adds no new ingestion
     logic of its own.
 
@@ -900,15 +898,6 @@ def tool_mine(
             "error": "include_ignored is supported only in projects mode",
             "error_class": "ValueError",
         }
-    # A truthy non-boolean ("false", 1) would silently opt into mining every
-    # subagent transcript, so accept only a real JSON boolean.
-    if not isinstance(include_subagents, bool):
-        return {
-            "success": False,
-            "error": "include_subagents must be a boolean",
-            "error_class": "ValueError",
-        }
-
     src = os.path.expanduser(source) if source else ""
     # convos accepts one conversation file as well as a directory — the CLI has
     # always documented it that way ("Directory to mine, or one conversation
@@ -916,7 +905,7 @@ def tool_mine(
     # submits a single .jsonl. Because cmd_mine forwards to the hub whenever one
     # is live, a directory-only precondition here made that documented form
     # unreachable in the configuration most users run, so every hook transcript
-    # ingest failed against a running hub (#2281). The other modes still walk a
+    # ingest failed against a running hub. The other modes still walk a
     # tree, so they keep the directory requirement.
     if not src or not (os.path.isdir(src) or (mode == "convos" and os.path.isfile(src))):
         return {"success": False, "error": f"source not found: {source!r}"}
@@ -1040,20 +1029,18 @@ def tool_mine(
 def tool_delete_by_source(source_file: str, dry_run: bool = True):
     """Delete every drawer whose ``source_file`` metadata matches exactly.
 
-    Bulk cleanup for the contamination case in #1722, where benchmark/eval
-    files (ShareGPT dumps, ``results_mempal_*.jsonl``, language config JSON)
-    get mined into the same wing as real user data and drown out semantic
-    search. Previously the only recourse was hand-rolled SQLite ``DELETE``
-    against ``chroma.sqlite3``.
+    Bulk cleanup for benchmark/eval files (ShareGPT dumps,
+    ``results_mempal_*.jsonl``, language config JSON) mined into the same
+    wing as real user data, where they drown out semantic search.
 
     Matching is exact on the stored ``source_file`` value and pushed down to
     the backend via ``delete(where=...)`` — the same idiom used by the miner
     and diary ingest paths — so there is no client-side id list and the
     SQLite "too many variables" limit cannot be hit, regardless of how many
-    drawers share the source (the reporter had 55k).
+    drawers share the source.
 
     Also purges the matching closets (the AAAK index layer) so deleting the
-    drawers doesn't strand stale index pointers at the dead source (#1722).
+    drawers doesn't strand stale index pointers at the dead source.
 
     Defaults to a dry run: it reports the drawer match count, the closet match
     count, and a small sample so the caller can confirm the blast radius before
@@ -1065,7 +1052,7 @@ def tool_delete_by_source(source_file: str, dry_run: bool = True):
         return {"success": False, "error": "source_file must be a non-empty string"}
     # Mirror the ingestion-side normalization (tool_add_drawer strips lone
     # surrogates from source_file before storing) so exact matching still hits
-    # rows mined from non-ASCII paths that arrived via a cp1252 stdin (#1488).
+    # rows mined from non-ASCII paths that arrived via a cp1252 stdin.
     source_file = strip_lone_surrogates(source_file)
 
     col = _get_collection()
@@ -1159,7 +1146,7 @@ def tool_delete_by_source(source_file: str, dry_run: bool = True):
 
 
 def tool_sync(project_dir: str = None, wing: str = None, apply: bool = False):
-    """Prune drawers whose source files are gitignored, missing, or moved (#1252)."""
+    """Prune drawers whose source files are gitignored, missing, or moved."""
     global _metadata_cache
     from ..daemon import LOCK_REFUSAL_ERROR_CLASS
     from ..palace import MineAlreadyRunning
@@ -1344,7 +1331,7 @@ def tool_list_drawers(
     """List logical drawers with pagination.
 
     Optional ``since`` / ``before`` filter by drawer ``filed_at`` (ISO date or
-    timestamp): ``since`` is inclusive, ``before`` is exclusive (#1128). A
+    timestamp): ``since`` is inclusive, ``before`` is exclusive. A
     drawer whose ``filed_at`` is missing or unparseable is excluded while a
     date bound is active. The filter is applied in Python after the rows are
     fetched — ChromaDB rejects string operands for ``$gte``/``$lt`` (1.5.7),
@@ -1357,8 +1344,8 @@ def tool_list_drawers(
     try:
         wing = _sanitize_optional_name(wing, "wing")
         room = _sanitize_optional_name(room, "room")
-        since_dt = _parse_date_filter(since, "since")
-        before_dt = _parse_date_filter(before, "before")
+        since_dt = parse_date_bound(since, "since")
+        before_dt = parse_date_bound(before, "before")
         if since_dt is not None and before_dt is not None and since_dt >= before_dt:
             raise ValueError(f"since ({since!r}) must be earlier than before ({before!r})")
     except ValueError as e:
@@ -1374,7 +1361,7 @@ def tool_list_drawers(
                 drawers = [
                     d
                     for d in drawers
-                    if _filed_at_in_window(
+                    if filed_at_in_window(
                         d.get("metadata", {}).get("filed_at"), since_dt, before_dt
                     )
                 ]
@@ -1468,7 +1455,7 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             # Case-sensitive comparison: a case-only rename IS a rename.
             # ``list_drawers`` is case-sensitive, so case-duplicate wings are
             # distinct destinations, and the caller's exact casing is
-            # authoritative (#2395).
+            # authoritative.
             if wing != str(old_meta.get("wing") or ""):
                 new_meta["wing"] = wing
 
@@ -1552,7 +1539,7 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             logger.info("Updated drawer: %s", drawer_id)
 
         # A closet quotes the source file, not the stored drawer, so it only
-        # goes stale on a content change; wing/room alone leaves it correct (#2325).
+        # goes stale on a content change; wing/room alone leaves it correct.
         # Purged only after the drawer write commits, so a failed write keeps them.
         outcome["closets_deleted"] = 0
         if content is not None:

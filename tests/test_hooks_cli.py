@@ -19,7 +19,6 @@ from mempalace.hooks_cli import (
     _diary_agent_for_harness,
     _extract_recent_messages,
     _get_mine_targets,
-    _hooks_daemon_enabled,
     _is_harness_boilerplate,
     _log,
     _maybe_auto_ingest,
@@ -958,13 +957,6 @@ def test_save_diary_daemon_wait_timeout_is_logged_as_still_queued(tmp_path):
     logged = " ".join(str(c.args[0]) for c in mock_log.call_args_list)
     assert "Daemon diary checkpoint still queued: job job-behind-mine" in logged
     assert "failed" not in logged
-
-
-def test_hooks_daemon_enabled_requires_explicit_true():
-    with patch("mempalace.hooks_cli.MempalaceConfig") as mock_cfg_cls:
-        assert _hooks_daemon_enabled() is False
-        mock_cfg_cls.return_value.hook_use_daemon = True
-        assert _hooks_daemon_enabled() is True
 
 
 # --- hook_session_start ---

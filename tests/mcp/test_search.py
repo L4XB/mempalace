@@ -386,10 +386,20 @@ class TestSearchTool:
 
         monkeypatch.setattr(mcp_server, "search_memories", lambda *a, **kw: pytest.fail())
 
-        result = mcp_server.tool_search(query="rareterm", candidate_strategy="bm25")
+        response = mcp_server.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "mempalace_search",
+                    "arguments": {"query": "rareterm", "candidate_strategy": "bm25"},
+                },
+            }
+        )
 
-        assert "error" in result
-        assert "candidate_strategy" in result["error"]
+        assert response["error"]["code"] == -32602
+        assert "candidate_strategy" in response["error"]["message"]
 
     def test_list_rooms_rejects_invalid_wing(self, monkeypatch, config, kg):
         _patch_mcp_server(monkeypatch, config, kg)

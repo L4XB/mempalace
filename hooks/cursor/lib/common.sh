@@ -127,7 +127,7 @@ except Exception:
 #
 # Uses the same sentinel + `sed -n 'Np'` extraction as the Claude Code
 # hooks for bash 3.2 compatibility (mapfile/readarray are unavailable
-# on macOS /bin/bash 3.2.57; #1440 regression). Each line of output is
+# on macOS /bin/bash 3.2.57). Each line of output is
 # pre-sanitised by the Python side to a shell-safe character set.
 mempal_parse_stdin() {
     local input="${1:-}"
@@ -348,8 +348,8 @@ mempal_consume_pending() {
 #
 # Per-conversation state artifacts (cursor_<conv>.count and
 # cursor_<conv>.pending) accumulate one set per conversation and are
-# never otherwise removed (igorls review, PR #1632 — unbounded state
-# growth). Reads MEMPAL_STATE_TTL_DAYS (default 30), validated
+# never otherwise removed, so they would grow without bound. Reads
+# MEMPAL_STATE_TTL_DAYS (default 30), validated
 # digits-only and leading-zero-stripped (mirrors the SAVE_INTERVAL
 # sanitiser) so `find -mtime` never sees a bad or octal token. Empty or
 # non-numeric floors to 30; a value of 0 means "sweep everything older

@@ -70,10 +70,10 @@ def _split_entries(text):
 
 
 def _diary_drawer_id_entry(wing: str, date_str: str, entry_idx: int, entry_chunk_idx: int) -> str:
-    """Per-entry, per-chunk drawer ID introduced in #1539.
+    """Per-entry, per-chunk drawer ID.
 
     The ``v2_`` prefix distinguishes new IDs from the legacy file-level
-    scheme (one drawer per file). Legacy drawers from pre-#1539 palaces
+    scheme (one drawer per file). Legacy file-level drawers
     are auto-purged on any ``ingest_diaries`` call that triggers a full
     rebuild (``force=True`` or detected content change): the rebuild's
     prune drops every drawer of the ``source_file`` it did not just write,
@@ -184,7 +184,7 @@ def ingest_diaries(
                 "filed_at": now_iso,
             }
             # Which directory this diary was read from, so ``sync`` decides an
-            # ingested drawer by the same reading as a mined one (#2320).
+            # ingested drawer by the same reading as a mined one.
             base_meta.update(identity_metadata(source_file))
             base_meta.update(encoding_metadata(source_encoding))
             if entities:

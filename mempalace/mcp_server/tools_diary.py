@@ -15,7 +15,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     what it worked on, what it noticed, what it thinks matters.
 
     Note: ``agent_name`` is normalized to lowercase before storage so
-    that diary reads are case-insensitive (see #1243). "Claude",
+    that diary reads are case-insensitive. "Claude",
     "claude", and "CLAUDE" all resolve to the same agent.
     """
     from ..daemon import LOCK_REFUSAL_ERROR_CLASS
@@ -88,10 +88,9 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         # Oversized entry: split into bounded per-chunk drawers so the
         # embedding model never sees a document above ``chunk_size``.
         # Every chunk carries ``chunk_index`` for ordered reconstruction
-        # and the group id under BOTH ``parent_entry_id`` (the original
-        # #1539 key, kept so existing readers and palaces are unaffected)
-        # and ``parent_drawer_id`` (the key the logical-id read paths were
-        # built around in #1782) -- see ``_PARENT_ID_KEYS`` (#2185).
+        # and the group id under BOTH ``parent_entry_id`` (the diary key
+        # existing readers and palaces use) and ``parent_drawer_id`` (the
+        # key the logical-id read paths use) -- see ``_PARENT_ID_KEYS``.
         # Note on ``entry_id`` in the return value: for the chunked path
         # the returned ``entry_id`` is the LOGICAL group handle -- no
         # drawer is stored under that exact id, but it resolves through
@@ -138,11 +137,11 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         # mirroring tool_mine / tool_sync. The lock wraps ``col.add`` itself, so
         # a peer holding it means no entry was filed -- a refusal, not a write
         # failure -- and the daemon defers such a job rather than dead-lettering
-        # it (#2014). Swallowed into the generic branch the refusal loses
+        # it. Swallowed into the generic branch the refusal loses
         # ``error_class``, becomes indistinguishable from a genuine write error,
         # and the queued diary entry is dropped. The daemon's constant, not a
         # literal: the two sides are a wire contract, and drift on either end
-        # silently un-fixes #2014.
+        # silently drops refused entries again.
         return {
             "success": False,
             "error": f"another mine is in progress: {e}",
@@ -214,7 +213,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     silo those entries from agent-initiated reads.
 
     Note: ``agent_name`` is normalized to lowercase before filtering so
-    that reads are case-insensitive (see #1243). Entries written under
+    that reads are case-insensitive. Entries written under
     pre-fix mixed-case agent names will not match the lowercase filter;
     use ``mempalace repair`` to migrate legacy data if needed.
     """
@@ -233,8 +232,8 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
         return _collection_error_or_no_palace()
 
     # Build filter: always scope by agent + room=diary. Wing is optional —
-    # when empty, return entries across all wings for this agent (matches
-    # the #1097 empty-string-as-no-filter convention for LLM ergonomics).
+    # when empty, return entries across all wings for this agent (the
+    # empty-string-as-no-filter convention, for LLM ergonomics).
     conditions = [{"room": "diary"}, {"agent": agent_name}]
     if wing:
         conditions.insert(0, {"wing": wing})
@@ -369,7 +368,7 @@ def _attach_stale_library_warning(result: dict) -> dict:
     """Stamp the stale-library write-guard state onto a reconnect result.
 
     Reconnect reopens the database but cannot reload Python modules, so it
-    never clears the stale-library gate (#899). Without this, a reconnect
+    never clears the stale-library gate. Without this, a reconnect
     after an upgrade answers "success: Reconnected to palace" while every
     write keeps failing — the caller has no way to tell the two states
     apart from the reconnect result alone.
@@ -464,8 +463,8 @@ def _tool_reconnect_locked():
     ChromaBackend._quarantined_paths.discard(_config.palace_path)
     # Force probe re-run on next _get_client by clearing the flag now;
     # _refresh_vector_disabled_flag will re-set it if the divergence
-    # still applies after the reconnect. The probe keeps its own cache
-    # (#1471), so drop that too — otherwise the "re-run" would be served
+    # still applies after the reconnect. The probe keeps its own cache,
+    # so drop that too — otherwise the "re-run" would be served
     # from the verdict this reconnect is meant to discard.
     reset_hnsw_capacity_cache()
     _vector_disabled = False

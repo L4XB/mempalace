@@ -844,7 +844,7 @@ class _PgVectorClient:
         # metadata (e.g. mempalace_status's wing/room tally). Keeps the
         # positional _row parser unchanged — document remains record[1] —
         # while avoiding O(n × document_size) bytes over the wire on remote
-        # pgvector deployments. Follow-up to #1840.
+        # pgvector deployments.
         cols = "id, document, metadata" if with_document else "id, NULL::text, metadata"
         if with_embedding:
             cols += ", embedding"
@@ -1103,7 +1103,7 @@ class PgVectorCollection(BaseCollection):
         Filtered fetches still need the ``_matches_where`` post-filter for
         non-pushdown semantics (array/object values where ``metadata @> ...``
         is broader than the exact match the caller asked for — same
-        correctness contract as #1840's filtered ``get`` path). Since that
+        correctness contract as the filtered ``get`` path). Since that
         post-filter only reads ``metadata``, we keep the single-scroll +
         ``with_document=False`` fast path and just apply the filter locally
         on the metadata dicts before returning. This extends the wire-byte
@@ -1410,7 +1410,7 @@ class PgVectorCollection(BaseCollection):
 
         The base implementation scans a window in storage order and sorts it
         locally, so on a collection larger than ``limit`` the genuinely newest
-        records can be missing from the window entirely (#1630). Postgres can
+        records can be missing from the window entirely. Postgres can
         do the whole thing: ``ORDER BY metadata->>'filed_at' DESC ... LIMIT n``
         picks the true top ``limit`` under that ordering at any table size,
         which is why this backend advertises ``supports_recency_order``.
@@ -1465,7 +1465,7 @@ class PgVectorCollection(BaseCollection):
                 with_embedding=spec.embeddings,
                 # The post-filter reads only ``metadata``, and this branch can
                 # scan far more rows than it returns, so project the document
-                # text out unless the caller actually asked for it (#1840's
+                # text out unless the caller actually asked for it (the filtered ``get`` path's
                 # wire-byte win). The pushdown branch below is left alone: it
                 # fetches ``limit`` rows, so the projection is worth little
                 # there and not worth changing that path's SQL for. (It would
@@ -1521,7 +1521,7 @@ class PgVectorCollection(BaseCollection):
         # Validate the filter before the existence short-circuit so an
         # unsupported local-only filter raises even on an unmaterialized
         # collection — matches the order used by get()/lexical_search() and
-        # qdrant.facet_counts (PR #1868 review).
+        # qdrant.facet_counts.
         _validate_where(where)
         if _requires_local_filter(where):
             raise UnsupportedCapabilityError("facet_counts does not support local-only filters")

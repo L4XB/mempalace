@@ -12,9 +12,8 @@ def _first_or_empty(results, key: str) -> list:
 
     Accepts both the typed :class:`QueryResult` (attribute access) and the
     pre-typed chroma dict shape; this polymorphism is retained so test mocks
-    still work and callers mid-migration do not crash. Preserves the empty-
-    collection semantics from issue #195: when no queries returned hits, the
-    outer list may be empty and indexing ``[0]`` would raise.
+    still work and callers mid-migration do not crash. When no queries
+    returned hits the outer list may be empty, and indexing ``[0]`` would raise.
     """
     outer = getattr(results, key, None) if not isinstance(results, dict) else results.get(key)
     if not outer:
@@ -26,7 +25,7 @@ def build_where_filter(wing: str = None, room: str = None, source_file: str = No
     """Build a ChromaDB where filter from optional wing/room/source_file.
 
     ChromaDB needs a ``$and`` only when ≥2 clauses are present; a single
-    clause is returned bare and zero clauses yield an empty filter (#1815).
+    clause is returned bare and zero clauses yield an empty filter.
     """
     clauses = []
     if wing:
@@ -71,7 +70,7 @@ def _distance_to_similarity(distance, metric: str = "cosine") -> float:
     if m == "ip":
         # Clamp the exponent so a large positive distance can't overflow.
         return 1.0 / (1.0 + math.exp(min(60.0, distance)))
-    # cosine (default)
+    # Cosine is the default metric.
     return max(0.0, 1.0 - distance)
 
 

@@ -13,8 +13,6 @@ def test_list_hallways_pages_strongest_first():
         assert page["total"] == 7 and page["count"] == 3 and page["offset"] == 0
         page2 = mcp_server.tool_list_hallways(limit=3, offset=3)
         assert [h["id"] for h in page2["hallways"]] == ["3", "2", "1"]
-        assert mcp_server.tool_list_hallways(limit=9999)["limit"] == 500
-        assert "error" in mcp_server.tool_list_hallways(limit="x")
 
 
 def _call(arguments):

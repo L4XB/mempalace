@@ -56,10 +56,6 @@ from ..search_util import (
 )
 from ..stored_text import decode_record, encode_filter
 
-# Closet pointer line format: "topic|entities|→drawer_id_a,drawer_id_b"
-# Multiple lines may join with newlines inside one closet document.
-_CLOSET_DRAWER_REF_RE = re.compile(r"→([\w,]+)")
-
 logger = logging.getLogger("mempalace_mcp")
 
 

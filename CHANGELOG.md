@@ -10,6 +10,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Upgrade notes
 
+- **`python -m mempalace.dedup` is gone.** It deleted near-duplicate drawers
+  and also any drawer shorter than 20 characters, so it could remove real
+  memories. Nothing else in MemPalace called it. A re-mine already replaces a
+  file's own drawers without duplicating them, and search folds identical text
+  from different files at read time.
+- **`python -m mempalace.onboarding` is gone.** `mempalace init` does project
+  setup, and the one choice only onboarding offered, the embedding model, is
+  now `mempalace init --embedding-model embeddinggemma` (or `minilm`,
+  `embeddinggemma2`, `openai-compat`), which records it in `config.json`.
+  `MEMPALACE_EMBEDDING_MODEL` and `embedding_model` in `config.json` work as
+  before. Onboarding's `aaak_entities.md` and `critical_facts.md` bootstrap
+  files are no longer written; nothing read them.
+- **`mempalace export <dir>` writes the palace out as markdown.** One folder
+  per wing, one file per room, with an `index.md`; it was only reachable from
+  Python before.
 - **`mempalace init` records a backend chosen with `MEMPALACE_BACKEND`.** The
   backend is read from `config.json` before the environment, and a palace init
   has not created yet has nothing on disk to detect it from, so the first

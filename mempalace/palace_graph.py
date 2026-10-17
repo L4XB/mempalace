@@ -216,9 +216,9 @@ def _get_collection(config=None):
 
 
 def _iter_all_metadata(col):
-    """Yield every drawer's metadata using the backend's own cursor (#2452).
+    """Yield every drawer's metadata using the backend's own cursor.
 
-    ``get_all_metadata`` (#1796) is a single pass on every backend; the
+    ``get_all_metadata`` is a single pass on every backend; the
     offset loop it replaces is O(n^2) on qdrant, where each page re-walks the
     collection from the start. The loop is kept only for collection objects
     that predate the contract method.
@@ -280,13 +280,9 @@ def build_graph(col=None, config=None):
     try:
         for meta in _iter_all_metadata(col):
             # ChromaDB can return ``None`` for drawers without metadata
-            # (legacy data, partial writes — upstream #1020 territory).
-            # Skip these silently rather than crash the whole graph
-            # build — a single None drawer shouldn't take down /stats
-            # or any caller of build_graph for the entire palace. Caught
-            # 2026-04-25 by palace-daemon's verify-routes.sh smoke test
-            # against the canonical 151K palace. Closes the same gap as
-            # upstream #999 / fork PR #1094 in a different read path.
+            # (legacy data, partial writes). Skip them rather than fail the
+            # whole graph build: one bare drawer must not take down every
+            # caller of build_graph.
             if meta is None:
                 continue
             room = meta.get("room", "")
@@ -687,7 +683,7 @@ def tunnel_batch(config=None):
 
     Inside the batch, :func:`create_tunnel` calls for the same tunnel file
     insert or update through an id index instead of loading, scanning and
-    rewriting the whole file per tunnel (#2683). The mine's tunnel passes
+    rewriting the whole file per tunnel. The mine's tunnel passes
     run inside one; outside a batch every call still loads, mutates and
     saves on its own, so MCP tools and explicit user tunnels are unchanged.
 
@@ -737,10 +733,8 @@ def _upsert_tunnel(tunnels: list, existing, tunnel: dict) -> dict:
         # reset the connection's strength / stability / access_count
         # — defeating the living-connection layer. Backfill any
         # still-missing fields so legacy records also pick up
-        # defaults on next touch. Per PR #1578 review
-        # (gemini-code-assist, medium priority): use dict-update
-        # with a comprehension so the field list lives in one place
-        # and future schema expansion can't drop a field by accident.
+        # defaults on next touch. One dict-update over the field list
+        # keeps that list in one place, so a new field can't be dropped.
         _dyn_fields = ("strength", "stability", "last_activated", "access_count")
         tunnel.update({k: existing[k] for k in _dyn_fields if k in existing})
         initialize_dynamics_fields(tunnel)
@@ -770,7 +764,7 @@ def create_tunnel(
     resolve to the same canonical ID. A second call with the same endpoints
     updates the stored label (and drawer IDs, if provided) rather than
     creating a duplicate. Endpoints are compared **verbatim** — ``"my-wing"``
-    and ``"my_wing"`` are distinct (see Note below and #1504).
+    and ``"my_wing"`` are distinct (see Note below).
 
     The ``source`` / ``target`` fields on the returned dict preserve the
     argument order the caller used, so callers can display it directionally
@@ -805,22 +799,20 @@ def create_tunnel(
         produces two distinct tunnels (canonical IDs differ). Read-path helpers
         (``list_tunnels`` / ``follow_tunnels``) normalize both sides at compare
         time so legacy underscore data and explicit-flag hyphen data both
-        match queries in either form. See #1504.
+        match queries in either form.
     """
     source_wing = _require_name(source_wing, "source_wing")
     source_room = _require_name(source_room, "source_room")
     target_wing = _require_name(target_wing, "target_wing")
     target_room = _require_name(target_room, "target_room")
 
-    # Single MempalaceConfig() per call — reused by _get_tunnel_file /
-    # _load_tunnels / _save_tunnels below. Each MempalaceConfig() re-reads
-    # mempalace.yaml from disk; before this change the helpers each
-    # instantiated their own, triggering several redundant disk reads per
-    # create_tunnel call (flagged by gemini-code-assist on #1469).
+    # One MempalaceConfig() per call, reused by _get_tunnel_file /
+    # _load_tunnels / _save_tunnels below: each instance re-reads its config
+    # from disk.
     config = config or MempalaceConfig()
 
     # Validate room existence for explicit tunnels only. Use the verbatim wing
-    # slugs here so #1504's hyphen-preserving write path remains intact.
+    # slugs here so the hyphen-preserving write path stays intact.
     if kind == "explicit":
         col = _get_collection(config)
         if not _check_room_exists(source_wing, source_room, col):
@@ -878,7 +870,7 @@ def list_tunnels(wing: str = None):
     if norm_wing:
         # Normalize stored wings too: older tunnels.json records hold the
         # underscore form (from the prior write-path normalization), while
-        # post-#1504 records hold whatever the caller passed. Comparing
+        # newer records hold whatever the caller passed. Comparing
         # normalized-on-both-sides matches either.
         # ``t.get(k) or {}`` (not ``t.get(k, {})``) handles ``"source": null``
         # from a hand-edited file — ``.get`` defaults only on missing keys.
@@ -1096,7 +1088,7 @@ def compute_topic_tunnels(
 
     wings = sorted(wing_topics.keys())
     created: list[dict] = []
-    # One load and one save for the whole pass, not one per tunnel (#2683).
+    # One load and one save for the whole pass, not one per tunnel.
     with tunnel_batch(config):
         for i, wa in enumerate(wings):
             topics_a = wing_topics[wa]
@@ -1320,7 +1312,7 @@ def entity_tunnels_for_wing(
     links.sort()
 
     created: list = []
-    # One load and one save for the whole pass, not one per tunnel (#2683).
+    # One load and one save for the whole pass, not one per tunnel.
     with tunnel_batch(config):
         for _, entity, other_norm in links[: max(0, max_per_wing)]:
             wings_for_entity = candidates[entity]

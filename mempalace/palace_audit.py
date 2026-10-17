@@ -39,7 +39,6 @@ from .backends._inproc_sqlite import open_reader as open_palace_reader
 from .config import MempalaceConfig, normalize_wing_name
 from .hallways import (
     association_groups,
-    entity_spelling_key,
     is_generic_entity,
     is_self_link,
     list_hallways,
@@ -104,11 +103,6 @@ def _wing_prefix_pairs(wings: list[str]) -> list[tuple[str, str]]:
             if len(nb) > len(na) + 1 and nb.startswith(na) and nb[len(na)] == "_":
                 pairs.append((a, b))
     return pairs
-
-
-def hallway_entity_key(entity: str) -> str:
-    """Kept as the audit's name for :func:`mempalace.hallways.entity_spelling_key`."""
-    return entity_spelling_key(entity)
 
 
 # ── readers ──────────────────────────────────────────────────────────────────

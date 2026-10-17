@@ -30,7 +30,7 @@ class PalaceNotFoundError(BackendError, FileNotFoundError):
     """Raised when ``get_collection(create=False)`` is called on a missing palace.
 
     Subclass of ``FileNotFoundError`` so legacy callers that catch the latter
-    (pre-#413 seam) keep working unchanged.
+    (the pre-plugin seam) keep working unchanged.
     """
 
 
@@ -416,7 +416,7 @@ def recency_sort_key(meta: Optional[dict], order_field: str = "filed_at") -> tup
 
     This compares the timestamps as *text*, which is chronological only while
     every value shares one offset representation. It is not a new assumption:
-    Layer 1 has sorted ``filed_at`` as text since #1630 and this key just
+    Layer 1 has sorted ``filed_at`` as text and this key just
     names the behaviour. It is also not currently true of ``filed_at`` --
     ``diary_ingest`` writes ``datetime.now(timezone.utc).isoformat()``
     (``...+00:00``) while every other writer uses ``datetime.now().isoformat()``
@@ -584,7 +584,7 @@ class BaseCollection(ABC):
         return None
 
     def get_all_metadata(self, where: Optional[dict] = None) -> list[dict]:
-        """Return every matching record's metadata in one logical pass (#1796).
+        """Return every matching record's metadata in one logical pass.
 
         Default implementation pages through :meth:`get` using
         ``limit``/``offset`` -- correct for backends with a real server-side
@@ -597,7 +597,7 @@ class BaseCollection(ABC):
         cursor exactly once instead. Calling the default implementation on
         such a backend is O(n^2) in collection size: each page re-walks the
         entire collection just to discard everything outside the requested
-        slice. See issue #1796.
+        slice.
         """
         all_meta: list[dict] = []
         offset = 0
@@ -620,7 +620,7 @@ class BaseCollection(ABC):
         self, where: Optional[dict] = None, include: Optional[list[str]] = None
     ) -> GetResult:
         """Return every matching record -- ids plus the ``include``d fields --
-        in one logical pass (#2452).
+        in one logical pass.
 
         The ids-carrying sibling of :meth:`get_all_metadata`, for callers that
         need to know *which* rows they got (``list_drawers`` collapses chunk
@@ -684,7 +684,7 @@ class BaseCollection(ABC):
         when the collection holds no more than ``limit`` records matching
         ``where``, and *approximate* above that: the window is whatever the
         backend hands back first, so the genuinely newest records can fall
-        outside it (issue #1630's known limitation for Layer 1 wake-up).
+        outside it (a known limitation for Layer 1 wake-up).
         Backends able to push the ordering into storage MUST override this and
         advertise the ``supports_recency_order`` capability token. What that
         token promises, exactly:

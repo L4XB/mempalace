@@ -2,7 +2,7 @@
 
 ``mempalace serve`` (and ``mempalace-mcp --transport http``) is meant to be
 the single long-lived writer for a shared palace: once it performs its first
-mutating tool call it holds the per-palace MCP writer lease (#1818) for its
+mutating tool call it holds the per-palace MCP writer lease for its
 whole lifetime, and every other process is refused palace writes. That is
 correct for agents — they talk to the hub — but the background save hooks
 and the plain CLI still spawn short-lived ``mempalace mine`` processes,

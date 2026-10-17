@@ -11,10 +11,9 @@ def cmd_init(args):
     from ..project_scanner import discover_entities
     from ..room_detector_local import detect_rooms_local
 
-    # Honor --palace (issue #1313): without this, init silently ignored the
-    # flag and always used ~/.mempalace. Mirror the env-var pattern used by
-    # mcp_server.py so every downstream read of ``cfg.palace_path`` (Pass 0,
-    # cfg.init(), the post-init mine) routes to the user-specified location.
+    # --palace goes through the environment, like mcp_server.py, so every
+    # downstream read of ``cfg.palace_path`` (Pass 0, cfg.init(), the
+    # post-init mine) uses it.
     explicit_palace = None
     if getattr(args, "palace", None):
         explicit_palace = os.path.abspath(os.path.expanduser(args.palace))
@@ -34,6 +33,10 @@ def cmd_init(args):
     else:
         languages = cfg.entity_languages
     languages_tuple = tuple(languages)
+
+    embedding_model = getattr(args, "embedding_model", None)
+    if embedding_model:
+        cfg.set_embedding_model(embedding_model)
 
     # --llm is ON by default. --no-llm is the explicit opt-out. Provider
     # precedence is unchanged (Ollama localhost first, then openai-compat,
@@ -64,7 +67,7 @@ def cmd_init(args):
             if ok:
                 llm_provider = candidate
                 print(f"  LLM enabled: {provider_name}/{provider_model}")
-                # Privacy warning (issue #24): if the configured endpoint
+                # Privacy warning: if the configured endpoint
                 # sends data off the user's machine/network, surface that
                 # before init proceeds. URL-based — Ollama on localhost,
                 # LM Studio on LAN, etc. won't trigger; Anthropic /
@@ -77,7 +80,7 @@ def cmd_init(args):
                         f"retains, or uses your data. Pass --no-llm to keep "
                         f"init fully local."
                     )
-                    # Consent gate (issue #26): block init when the api_key
+                    # Consent gate: block init when the api_key
                     # was acquired via env-fallback (stray credential in
                     # shell env). Explicit --llm-api-key (api_key_source ==
                     # "flag") means the user already opted in.
@@ -182,8 +185,8 @@ def cmd_init(args):
 
             # Match the slug ``room_detector_local`` writes into
             # ``mempalace.yaml`` so the miner's tunnel lookup hits the
-            # same key in ``topics_by_wing`` at mine time (issue #1194 —
-            # without this, hyphenated dirnames silently lose tunnels).
+            # same key in ``topics_by_wing`` at mine time; without this,
+            # hyphenated dirnames silently lose tunnels.
             wing = normalize_wing_name(project_path.name)
             registry_path = add_to_known_entities(confirmed, wing=wing)
             if registry_path:

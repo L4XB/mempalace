@@ -565,7 +565,7 @@ def _wing_metadata_from_sqlite(col, wing: str) -> Optional[list]:
     Returns ``None`` when ``col`` has no such stream or reading it failed, and
     the caller pages instead. Paging is ``get(where={"wing": ...}, offset=N)``,
     which Chroma runs as SQL ``OFFSET``: every page re-walks the rows before
-    it, so a large wing costs the square of its size (#2684).
+    it, so a large wing costs the square of its size.
 
     The read is scoped to the wing in sqlite, and only drawers holding
     ``entities`` are read, both through the ``(key, string_value)`` index, so
@@ -611,10 +611,10 @@ def _wing_metadata_paged(col, wing: str) -> list:
 
     An unbounded get(where={"wing": wing}) binds one SQL variable per matched
     id and overflows SQLite's SQLITE_MAX_VARIABLE_NUMBER (32766) on wings >
-    ~32k drawers (#1619); a bounded page binds at most batch_size ids. Walking
+    ~32k drawers; a bounded page binds at most batch_size ids. Walking
     the WHOLE collection instead and filtering client-side cost O(total palace
     drawers) on every mine, so filing one small session into an 800k-drawer
-    palace pegged the CPU for minutes (#2466). The client-side wing check
+    palace pegged the CPU for minutes. The client-side wing check
     stays as a guard for stores that ignore ``where``. The loop ends on a
     short page: count() counts every wing, so it cannot bound a scoped walk.
     """
@@ -667,9 +667,9 @@ def compute_hallways_for_wing(
             The fetch is scoped to ``wing`` server-side AND paginated: an
             unbounded ``.get(where=...)`` binds one SQL variable per matched
             id and overflows SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` on wings
-            above ~32k drawers (#1619), while an unscoped page walk costs
+            above ~32k drawers, while an unscoped page walk costs
             O(total palace drawers) on every mine, pegging the CPU for
-            minutes on large palaces (#2466). A bounded page never binds more
+            minutes on large palaces. A bounded page never binds more
             than ``batch_size`` ids. Fake collections and alternate backends
             must implement this shape. If ``None``, returns ``[]`` (caller
             didn't supply a backing store, so nothing to compute against).
@@ -714,7 +714,7 @@ def compute_hallways_for_wing(
     min_count = max(1, int(threshold))
 
     # 1. Query drawers for this wing. On Chroma, one linear pass over the
-    #    drawers holding entities (#2684); elsewhere, wing-scoped pages.
+    #    drawers holding entities; elsewhere, wing-scoped pages.
     try:
         metadatas = _wing_metadata_from_sqlite(col, wing)
         if metadatas is None:
@@ -804,8 +804,7 @@ def compute_hallways_for_wing(
             # match the symmetric ID generation in _hallway_id (which also
             # sorts). Without this, a persisted record with reversed entity
             # order would silently miss the lookup and lose its accumulated
-            # dynamics on every recompute. Per PR #1578 review
-            # (gemini-code-assist, HIGH priority).
+            # dynamics on every recompute.
             key = tuple(
                 sorted(
                     [

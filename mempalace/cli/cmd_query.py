@@ -175,6 +175,13 @@ def cmd_hallways(args):
         print(f"    {label}")
 
 
+def cmd_export(args):
+    from ..exporter import export_palace
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    export_palace(palace_path, os.path.expanduser(args.output_dir))
+
+
 def cmd_status(args):
     from ..miner import status
 

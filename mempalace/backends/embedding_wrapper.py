@@ -104,7 +104,6 @@ def _as_list(value):
     ``list({"k": 1})`` yields ``['k']`` — either desyncs embeddings/metadatas
     from ``ids`` on explicit-vector backends (pgvector, sqlite_exact). A list is
     returned unchanged (no copy); any other iterable is materialized once.
-    See PR #1706/#1707 review.
     """
     if isinstance(value, (str, dict)):
         return [value]
@@ -328,7 +327,7 @@ class EmbeddingCollection(BaseCollection):
         # base default — which routes back through ``self.get()`` (the
         # wrapper's get, then ``__getattr__`` to the inner's get). Result:
         # the inner's overridden ``get_all_metadata`` (e.g. pgvector's
-        # ``with_document=False`` fast path from #1892) is never reached,
+        # ``with_document=False`` fast path) is never reached,
         # and every metadata-only fetch transfers the full document column
         # over the wire. Same MRO-shadow pattern as ``facet_counts`` /
         # ``lexical_search`` above.

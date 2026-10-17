@@ -4,10 +4,9 @@ MemPalace MCP Server — read/write palace access for Claude Code
 ================================================================
 Install: claude mcp add mempalace -- mempalace-mcp [--palace /path/to/palace]
 
-The public import path remains ``mempalace.mcp_server``. Implementation is
-split across this package so PRs can target a domain file instead of one
-8 000-line module. Fragment files are executed into this package's globals
-(the same namespace as the historical module), which preserves:
+The public import path is ``mempalace.mcp_server``. Implementation is split
+by domain across this package. Fragment files are executed into this
+package's globals (one shared namespace), which preserves:
 
 * ``from mempalace.mcp_server import tool_status, TOOLS, handle_request, main``
 * test monkeypatches on ``mempalace.mcp_server._config`` / ``_get_kg`` / ...
@@ -35,7 +34,7 @@ Tools (maintenance):
 import os
 import sys
 
-# --- MCP stdio protection (issue #225) -----------------------------------
+# --- MCP stdio protection ---------------------------------------------------
 # The MCP protocol multiplexes JSON-RPC over stdio: stdout MUST carry only
 # valid JSON-RPC messages, stderr is for human-readable logs. Some
 # transitive dependencies (chromadb → onnxruntime, posthog telemetry) print
@@ -44,7 +43,7 @@ import sys
 # both the Python and file-descriptor level before heavy imports, then
 # restore the real stdout in main() before entering the protocol loop.
 #
-# Preserved across importlib.reload (#2485): once redirected, sys.stdout points
+# Preserved across importlib.reload: once redirected, sys.stdout points
 # to sys.stderr. If a reload executes unconditionally, it captures sys.stderr
 # into _REAL_STDOUT and duplicates the already-redirected fd 1, permanently
 # breaking stdout and leaking file descriptors.

@@ -44,12 +44,12 @@ _SAFE_NAME_RE = re.compile(r"^(?:[^\W_]|[^\W_][\w .'-]{0,126}[^\W_])$")
 # MCP clients (e.g. Claude Desktop, WorkBuddy) occasionally relay lone UTF-16
 # surrogates (U+D800–U+DFFF) when proxying binary-in-Unicode or corrupted
 # clipboard input. Python's ``str.encode('utf-8')`` raises on these, which
-# crashes ChromaDB add/upsert with -32000. See issue #1235.
+# crashes ChromaDB add/upsert with -32000.
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
 def strip_lone_surrogates(text: str) -> str:
-    """Replace lone UTF-16 surrogates with U+FFFD so the string is legal UTF-8 (#1235)."""
+    """Replace lone UTF-16 surrogates with U+FFFD so the string is legal UTF-8."""
     return _LONE_SURROGATE_RE.sub("�", text)
 
 
@@ -194,17 +194,6 @@ def sanitize_iso_temporal(value, field_name: str = "date"):
     return value
 
 
-def sanitize_iso_date(value, field_name: str = "date"):
-    """Backward-compatible wrapper for ISO temporal validation.
-
-    Historically this accepted only full dates. It now also accepts canonical
-    UTC datetimes, but the old name is kept so existing imports continue to
-    work.
-    """
-
-    return sanitize_iso_temporal(value, field_name)
-
-
 def sanitize_content(value: str, max_length: int = 100_000) -> str:
     """Validate drawer/diary content length."""
     if not isinstance(value, str) or not value.strip():
@@ -289,7 +278,7 @@ DEFAULT_MAX_BACKUPS = 10
 # Weights for the hybrid re-rank blend (vector embedding-similarity vs BM25
 # lexical) in ``searcher._hybrid_rank``. These were the function's hardcoded
 # defaults; surfaced as config so users can retune the blend without patching
-# site-packages (#2298).
+# site-packages.
 DEFAULT_HYBRID_VECTOR_WEIGHT = 0.6
 DEFAULT_HYBRID_BM25_WEIGHT = 0.4
 
@@ -348,7 +337,7 @@ def connect_sqlite_read(
     connection may not create the shared-memory index that WAL needs. The
     sidecars are absent exactly when nothing holds the palace open, which is
     the ordinary state before this process opens chroma, so a healthy palace
-    came back as unreadable and the integrity gate refused every tool (#2489).
+    came back as unreadable and the integrity gate refused every tool.
 
     Only that case takes a normal open, which creates the sidecars the
     read-only connection may not and takes SQLite's usual locks. ``immutable=1``
@@ -380,16 +369,6 @@ def get_configured_collection_name() -> str:
 DEFAULT_CHUNK_SIZE = 800
 DEFAULT_CHUNK_OVERLAP = 100
 DEFAULT_MIN_CHUNK_SIZE = 50
-
-DEFAULT_TOPIC_WINGS = [
-    "emotions",
-    "consciousness",
-    "memory",
-    "technical",
-    "identity",
-    "family",
-    "creative",
-]
 
 DEFAULT_HALL_KEYWORDS = {
     "emotions": [
@@ -584,7 +563,7 @@ class MempalaceConfig:
                     # ``[]``, ``"x"``, ``42``, ``true``). Every setting reads
                     # it through ``.get()``, so it is treated exactly like a
                     # file that does not parse: defaults now, kept aside by
-                    # the first setter (#2234).
+                    # the first setter.
                     self._file_config_state = "unparsed"
                     self._file_config_problem = (
                         f"is a JSON {_json_type_name(loaded)}, not an object"
@@ -725,7 +704,7 @@ class MempalaceConfig:
         if self._palace_path_override is not None:
             return self._palace_path_override
         # Precedence: MEMPALACE_PALACE_PATH (documented, primary) >
-        # MEMPALACE_PALACE (short alias accepted per #2366) > MEMPAL_PALACE_PATH (legacy).
+        # MEMPALACE_PALACE (short alias) > MEMPAL_PALACE_PATH (legacy).
         env_val = (
             os.environ.get("MEMPALACE_PALACE_PATH")
             or os.environ.get("MEMPALACE_PALACE")
@@ -961,11 +940,6 @@ class MempalaceConfig:
         return value is True
 
     @property
-    def topic_wings(self):
-        """List of topic wing names."""
-        return self._file_config.get("topic_wings", DEFAULT_TOPIC_WINGS)
-
-    @property
     def hall_keywords(self):
         """Mapping of hall names to keyword lists."""
         return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
@@ -1014,7 +988,7 @@ class MempalaceConfig:
         Enforces the invariants the miner relies on:
           * ``chunk_size >= 1``
           * ``0 <= chunk_overlap <= chunk_size // 2``. A larger overlap can
-            loop the miner forever on short-line content (#2056)
+            loop the miner forever on short-line content
           * ``min_chunk_size <= chunk_size`` — otherwise no chunk is ever
             large enough to file, and ingest silently produces 0 drawers
 
@@ -1029,7 +1003,7 @@ class MempalaceConfig:
 
         if chunk_overlap > chunk_size // 2:
             # Overlap past half the chunk size can hang miner.chunk_text's
-            # windowing loop on short-line content (#2056): a boundary pull can
+            # windowing loop on short-line content: a boundary pull can
             # shrink a chunk below chunk_overlap, so
             # ``start = end - chunk_overlap`` stops advancing. Repair to the
             # default when it is still at most half, else clamp to the largest
@@ -1070,7 +1044,7 @@ class MempalaceConfig:
         exchanges are not dropped) for untuned users while still honoring
         an explicit override —
         replacing the raw, unvalidated ``_file_config`` reach that crashed
-        convo ingest on a bad key (#1024 review).
+        convo ingest on a bad key.
         """
         raw = self._file_config.get("min_chunk_size")
         if raw is None:
@@ -1135,15 +1109,14 @@ class MempalaceConfig:
         """Embedding model identifier.
 
         Values: ``"minilm"`` (ChromaDB's all-MiniLM-L6-v2 — English-only),
-        ``"embeddinggemma"`` (multilingual, 100+ languages, default for
-        new installs since onboarding writes the choice),
+        ``"embeddinggemma"`` (multilingual, 100+ languages),
         ``"embeddinggemma2"`` (Google EmbeddingGemma 2), or
         ``"openai-compat"`` (embeddings served by an OpenAI-compatible
         ``/v1/embeddings`` endpoint — see ``embedding_api_url`` /
         ``embedding_api_model`` / ``embedding_api_key``). Read from env
         ``MEMPALACE_EMBEDDING_MODEL`` first, then ``embedding_model`` in
-        ``config.json``, then ``"minilm"`` as a back-compat fallback for
-        palaces created before onboarding asked the question.
+        ``config.json``, then ``"minilm"``, the model every older palace
+        was built with.
 
         Switching models on an existing palace requires re-embedding
         (different vector space) — ChromaDB rejects reads when the persisted
@@ -1176,7 +1149,7 @@ class MempalaceConfig:
 
     @property
     def embedding_threads(self) -> int:
-        """Cap on the embedder's ONNX Runtime intra-op thread pool (#1068).
+        """Cap on the embedder's ONNX Runtime intra-op thread pool.
 
         ChromaDB's ONNX embedder builds its ``InferenceSession`` with no thread
         cap, so the intra-op pool defaults to the physical core count and a
@@ -1207,9 +1180,9 @@ class MempalaceConfig:
 
     @property
     def embeddinggemma_batch_size(self) -> int:
-        """Documents per ``session.run()`` for the EmbeddingGemma ONNX model (#2330).
+        """Documents per ``session.run()`` for the EmbeddingGemma ONNX model.
 
-        The sub-batching added for #1770 bounds a run by document COUNT, not
+        Sub-batching bounds a run by document COUNT, not
         allocation: attention buffers scale with ``batch * padded_len ** 2``, so
         a batch of long documents can still exceed available memory at the
         module default (``mempalace.embedding._EMBEDDINGGEMMA_BATCH_SIZE``, 32).
@@ -1342,7 +1315,7 @@ class MempalaceConfig:
         fall back to the default rather than raising — a hand-edited
         ``config.json`` shouldn't take retrieval down. The default reproduces
         the previously-hardcoded weight, so leaving it unset is a
-        byte-identical blend (#2298).
+        byte-identical blend.
         """
         return self._resolve_float_setting(
             "MEMPALACE_HYBRID_VECTOR_WEIGHT",
@@ -1358,7 +1331,7 @@ class MempalaceConfig:
         Read from env ``MEMPALACE_HYBRID_BM25_WEIGHT`` first, then
         ``hybrid_rank_bm25_weight`` in ``config.json``, then the built-in
         default (``0.4``). Unset, non-numeric, infinite, or negative values
-        fall back to the default rather than raising (#2298).
+        fall back to the default rather than raising.
         """
         return self._resolve_float_setting(
             "MEMPALACE_HYBRID_BM25_WEIGHT",
@@ -1369,7 +1342,7 @@ class MempalaceConfig:
     def set_embedding_model(self, model: str) -> None:
         """Persist the embedding-model choice to ``config.json``.
 
-        Onboarding calls this once on first run. Accepts ``"minilm"``,
+        ``mempalace init --embedding-model`` calls this. Accepts ``"minilm"``,
         ``"embeddinggemma"``, ``"embeddinggemma2"``, or ``"openai-compat"``;
         other values are normalized to lowercase and persisted
         (:attr:`embedding_model` then reads unrecognized values as minilm,
@@ -1682,12 +1655,6 @@ class MempalaceConfig:
             )
 
         return resolve_write_routing_policy(candidates)
-
-    @property
-    def hook_write_routing(self) -> WriteRoutingPolicy:
-        """Resolved future routing policy for hook-triggered writes."""
-
-        return self.resolve_write_routing("hooks").policy
 
     @property
     def cli_write_routing(self) -> WriteRoutingPolicy:

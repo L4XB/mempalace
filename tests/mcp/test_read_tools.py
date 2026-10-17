@@ -1101,26 +1101,26 @@ class TestListDrawersDateFilters:
     """Unit tests for the #1128 date-filter helpers in mcp_server."""
 
     def test_parse_date_filter_none_and_blank(self):
-        from mempalace.mcp_server import _parse_date_filter
+        from mempalace.date_window import parse_date_bound as _parse_date_filter
 
         assert _parse_date_filter(None, "since") is None
         assert _parse_date_filter("   ", "since") is None
 
     def test_parse_date_filter_date_only(self):
 
-        from mempalace.mcp_server import _parse_date_filter
+        from mempalace.date_window import parse_date_bound as _parse_date_filter
 
         assert _parse_date_filter("2026-04-01", "since") == datetime(2026, 4, 1)
 
     def test_parse_date_filter_full_timestamp(self):
 
-        from mempalace.mcp_server import _parse_date_filter
+        from mempalace.date_window import parse_date_bound as _parse_date_filter
 
         assert _parse_date_filter("2026-04-01T09:30:00", "since") == datetime(2026, 4, 1, 9, 30)
 
     def test_parse_date_filter_drops_timezone(self):
 
-        from mempalace.mcp_server import _parse_date_filter
+        from mempalace.date_window import parse_date_bound as _parse_date_filter
 
         # tz offset dropped -> naive wall-clock, never raises vs naive filed_at.
         parsed = _parse_date_filter("2026-04-01T09:30:00+02:00", "since")
@@ -1130,7 +1130,7 @@ class TestListDrawersDateFilters:
     def test_parse_date_filter_rejects_garbage(self):
         import pytest
 
-        from mempalace.mcp_server import _parse_date_filter
+        from mempalace.date_window import parse_date_bound as _parse_date_filter
 
         with pytest.raises(ValueError, match="since"):
             _parse_date_filter("not-a-date", "since")
@@ -1138,14 +1138,14 @@ class TestListDrawersDateFilters:
     def test_parse_date_filter_rejects_impossible_date(self):
         import pytest
 
-        from mempalace.mcp_server import _parse_date_filter
+        from mempalace.date_window import parse_date_bound as _parse_date_filter
 
         with pytest.raises(ValueError):
             _parse_date_filter("2026-13-40", "before")
 
     def test_filed_at_in_window_since_inclusive(self):
 
-        from mempalace.mcp_server import _filed_at_in_window
+        from mempalace.date_window import filed_at_in_window as _filed_at_in_window
 
         since = datetime(2026, 1, 2)
         assert _filed_at_in_window("2026-01-02T00:00:00", since, None) is True
@@ -1153,7 +1153,7 @@ class TestListDrawersDateFilters:
 
     def test_filed_at_in_window_before_exclusive(self):
 
-        from mempalace.mcp_server import _filed_at_in_window
+        from mempalace.date_window import filed_at_in_window as _filed_at_in_window
 
         before = datetime(2026, 1, 3)
         assert _filed_at_in_window("2026-01-02T23:59:59", None, before) is True
@@ -1161,7 +1161,7 @@ class TestListDrawersDateFilters:
 
     def test_filed_at_in_window_missing_or_malformed_excluded(self):
 
-        from mempalace.mcp_server import _filed_at_in_window
+        from mempalace.date_window import filed_at_in_window as _filed_at_in_window
 
         since = datetime(2026, 1, 1)
         assert _filed_at_in_window(None, since, None) is False
@@ -1171,7 +1171,7 @@ class TestListDrawersDateFilters:
 
     def test_filed_at_in_window_tz_aware_wall_clock(self):
 
-        from mempalace.mcp_server import _filed_at_in_window
+        from mempalace.date_window import filed_at_in_window as _filed_at_in_window
 
         # tz dropped on both sides -> wall-clock compare, no TypeError raised.
         since = datetime(2026, 1, 2)
@@ -1179,7 +1179,7 @@ class TestListDrawersDateFilters:
 
     def test_parse_date_filter_accepts_zulu_suffix(self):
 
-        from mempalace.mcp_server import _parse_date_filter
+        from mempalace.date_window import parse_date_bound as _parse_date_filter
 
         # "Z" is not accepted by datetime.fromisoformat before 3.11; the helper
         # strips it so Zulu inputs parse on the 3.9 floor, tz then dropped.
@@ -1198,7 +1198,7 @@ class TestListDrawersDateFilters:
 
     def test_filed_at_in_window_accepts_zulu_filed_at(self):
 
-        from mempalace.mcp_server import _filed_at_in_window
+        from mempalace.date_window import filed_at_in_window as _filed_at_in_window
 
         since = datetime(2026, 1, 2)
         assert _filed_at_in_window("2026-01-02T08:00:00Z", since, None) is True

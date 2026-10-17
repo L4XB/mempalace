@@ -49,7 +49,6 @@ def _query_drawers_with_filter_fallback(
     drawers are ingested via two different paths (e.g. bulk import vs MCP tool
     calls), leaving the vector index inconsistent with the metadata store. We
     retry unfiltered (over-fetching) and re-apply the wing/room/source_file filter in Python.
-    See #1245 / #1035.
     """
     where = dkwargs.get("where")
     try:
@@ -221,11 +220,11 @@ def search_memories(
         wing: Optional wing filter.
         room: Optional room filter.
         source_file: Optional exact source_file filter. Matches the full
-            stored source_file value verbatim (#1815).
+            stored source_file value verbatim.
         since: Optional inclusive ISO date/datetime lower bound on a
             drawer's ``filed_at`` (ingest time, the ``created_at`` shown in
             results) — ``[since, before)`` window semantics shared with
-            ``list_drawers`` (#1128): wall-clock naive comparison, drawers
+            ``list_drawers``: wall-clock naive comparison, drawers
             with missing/unparseable ``filed_at`` excluded while a bound is
             active. Filtering happens after retrieval (ChromaDB rejects
             string operands for ``$gte``/``$lt``), so the candidate pool is
@@ -238,8 +237,8 @@ def search_memories(
             ``ip`` distances are converted before comparing). Candidates past
             it are dropped and counted in ``filtered_by_max_distance``.
             ``None`` (the default), ``0`` or a negative value applies no cutoff.
-        vector_disabled: When True, route to the sqlite-only BM25 fallback
-            (#1222). Set by the MCP server when the HNSW capacity probe
+        vector_disabled: When True, route to the sqlite-only BM25 fallback.
+            Set by the MCP server when the HNSW capacity probe
             detects a divergence that would segfault chromadb on segment
             load.
         candidate_strategy: How candidates for the hybrid re-rank are gathered.

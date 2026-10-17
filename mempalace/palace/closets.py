@@ -89,7 +89,7 @@ def _candidate_entity_words(text: str) -> list:
             except re.error:
                 continue
         _CANDIDATE_RX_CACHE = rxs
-    # Defuse ReDoS on long ASCII blobs before matching (#2063); see
+    # Defuse ReDoS on long ASCII blobs before matching; see
     # entity_detector._collapse_long_ascii_runs.
     stripped = _collapse_long_ascii_runs(text)
     words = []

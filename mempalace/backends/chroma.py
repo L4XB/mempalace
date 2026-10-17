@@ -104,7 +104,7 @@ _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
 # data_level0.bin, Chroma/HNSW can segfault while opening the segment even if
 # index_metadata.pickle is structurally valid.
 #
-# The report in #1218 showed ratios above 300x, while healthy snapshots were far below 1x.
+# Corrupted palaces have shown ratios above 300x, while healthy snapshots were far below 1x.
 # Treat only >10x as corruption so normal flush lag or small segments do not get
 # quarantined.
 _HNSW_LINK_TO_DATA_MAX_RATIO = 10.0
@@ -222,7 +222,7 @@ def _hnsw_link_lists_is_usable_for_payload(seg_dir: str) -> bool:
     stores the entire layer-0 graph inside ``data_level0.bin`` and only writes
     ``link_lists.bin`` for elements promoted to level > 0. A small or
     low-fanout index where every element stays on layer 0 therefore
-    serializes an empty ``link_lists.bin`` and loads/searches fine (#1716).
+    serializes an empty ``link_lists.bin`` and loads/searches fine.
     Treating that shape as corruption produced a self-perpetuating quarantine
     loop: repair rebuilt the byte-identical all-layer-0 segment, which the next
     cold start quarantined again, accumulating drift dirs without bound.
@@ -272,8 +272,8 @@ def _hnsw_payload_appears_sane(seg_dir: str) -> bool:
 # chromadb/segment/impl/vector/hnsw_params.py:79-80, and
 # https://docs.trychroma.com/docs/collections/configure).
 #
-# Both ran at 2 to answer #1579 (a sub-threshold mine left index_metadata.pickle
-# absent, and quarantine_stale_hnsw renamed the segment away). Three findings on
+# Both ran at 2 because a sub-threshold mine left index_metadata.pickle
+# absent, and quarantine_stale_hnsw renamed the segment away. Three findings on
 # chromadb 1.5.9 (PersistentClient / Rust bindings, single writer) retire that:
 #
 #   * 2 SITS OUTSIDE CHROMA'S OWN DECLARED VALID RANGE. hnsw_params.py:21-22
@@ -296,7 +296,7 @@ def _hnsw_payload_appears_sane(seg_dir: str) -> bool:
 #   * IT BUYS NOTHING. A 5-record collection at 100/1000 — far below the
 #     threshold, so no persist ever fires — reads back whole from a FRESH
 #     PROCESS (count and vector query both answer). On that artifact
-#     link_lists.bin is 0 bytes with no index_metadata.pickle, which is #1579's
+#     link_lists.bin is 0 bytes with no index_metadata.pickle, which is the
 #     trigger shape exactly, and quarantine_stale_hnsw() creates no drift dir:
 #     _segment_appears_healthy reads it as never-persisted rather than as a torn
 #     persist.
@@ -304,7 +304,7 @@ def _hnsw_payload_appears_sane(seg_dir: str) -> bool:
 # NOT claimed here: that a small sync_threshold is a known chroma failure mode.
 # No such report was found in chroma's issues or docs, and chroma's own guidance
 # runs the other way (raise sync_threshold for bulk inserts). The Python
-# persist path that #1579 and chroma#6975 describe does not execute under the
+# persist path that chroma#6975 describes does not execute under the
 # Rust bindings at all — hnswlib is not a dependency of this line.
 #
 # A palace keeps whatever thresholds it was created under;
@@ -1077,7 +1077,7 @@ def _vector_segment_id(palace_path: str, collection_name: str) -> Optional[str]:
     """Return the VECTOR segment UUID for ``collection_name`` or ``None``.
 
     Reads ``chroma.sqlite3`` directly so we never have to load a segment
-    that may segfault on open (#1222 is exactly this case).
+    that may segfault on open (the HNSW divergence crash).
     """
     db_path = os.path.join(palace_path, "chroma.sqlite3")
     if not os.path.isfile(db_path):
@@ -1171,7 +1171,7 @@ def _hnsw_element_count(palace_path: str, segment_id: str) -> Optional[int]:
     counts ``id_to_label`` entries. This is the count chromadb consults
     when sizing/loading the HNSW index on next open — distinct from
     hnswlib's internal ``cur_element_count`` in the binary files. For
-    #1222's divergence check this is the number that matters, because it
+    the divergence check this is the number that matters, because it
     is what gets compared against ``count() * resize_factor`` when
     chromadb decides whether to resize HNSW on load.
 
@@ -1224,12 +1224,12 @@ def _hnsw_element_count(palace_path: str, segment_id: str) -> Optional[int]:
 # Why dynamic: a palace carries whatever ``sync_threshold`` it was created
 # under, and flush-lag grows to that threshold before a persist fires — up
 # to 50K on a palace created under an old large guard, and 2 on one created
-# under the small guard that #1308 traces back to.
+# under the small guard behind the hnsw segment-writer failures.
 # A fixed 2000 floor would flag actively-written legacy palaces as
 # DIVERGED the moment their queue exceeded 10% of sqlite_count, even
 # though chromadb is behaving correctly. The floor must scale with the
-# per-collection sync_threshold to distinguish real corruption (#1222 was
-# 176 613 missing of 192 997, orders of magnitude past any reasonable
+# per-collection sync_threshold to distinguish real corruption (one
+# palace had 176 613 missing of 192 997, orders of magnitude past any reasonable
 # sync_threshold) from expected steady-state lag.
 _HNSW_DIVERGENCE_FALLBACK_FLOOR = 2000
 _HNSW_DIVERGENCE_FRACTION = 0.10
@@ -1457,7 +1457,7 @@ def _capacity_fingerprint(palace_path: str, segment_id: Optional[str]) -> tuple:
     ``index_metadata.pickle`` is caught. The probe reads that pickle partway
     through, then makes two more sqlite calls, so a signature taken only after
     the probe returned would record a mid-probe pickle rewrite as "unchanged"
-    while the verdict still reflected the pre-write file (#1471 review).
+    while the verdict still reflected the pre-write file.
     """
     return (
         _db_family_signature(palace_path),
@@ -1483,7 +1483,7 @@ def reset_hnsw_capacity_cache() -> None:
 def hnsw_capacity_status(palace_path: str, collection_name: str = "mempalace_drawers") -> dict:
     """Compare sqlite embedding count against HNSW element count.
 
-    The #1222 failure mode: ``max_elements`` froze at 16 384 while sqlite
+    The divergence failure mode: ``max_elements`` froze at 16 384 while sqlite
     accumulated 192 997 embeddings. Every subsequent tool call segfaulted
     when chromadb tried to load the undersized HNSW. This probe runs
     *before* anything touches the segment so we can warn (or fall back to
@@ -1502,7 +1502,7 @@ def hnsw_capacity_status(palace_path: str, collection_name: str = "mempalace_dra
     Never raises — a probe that throws would defeat the point.
 
     A fully-measured verdict is cached per ``(palace_path, collection_name)``
-    and reused while every file the probe reads is unchanged on disk (#1471).
+    and reused while every file the probe reads is unchanged on disk.
     Each call otherwise costs a ``COUNT(*)`` over the embeddings table and a
     full unpickle of the segment metadata — the two dominant costs — plus a few
     small sqlite reads, on a path every search, duplicate check and status call
@@ -1513,7 +1513,7 @@ def hnsw_capacity_status(palace_path: str, collection_name: str = "mempalace_dra
     Freshness comes from an ``(inode, mtime_ns, size)`` signature rather than a
     wall-clock TTL, so an external writer — ``mempalace repair``, a peer mine,
     another process — invalidates the verdict as soon as it touches the files,
-    instead of leaving the #1222 guard blind for a fixed window.
+    instead of leaving the divergence guard blind for a fixed window.
     ``_CAPACITY_CACHE_MAX_AGE_SECONDS`` caps how long one verdict may be
     reused, but only as a backstop for filesystems with coarse timestamps; the
     signature is what makes the verdict fresh.
@@ -1653,7 +1653,7 @@ def _hnsw_capacity_status_uncached(
             # Cause 2: payload size caps how many elements the segment can
             # hold. After a quarantine Chroma creates a replacement sized for
             # ~100 elements; that stub has no pickle either, so treating "no
-            # pickle" as unconditionally inconclusive leaves the #1222
+            # pickle" as unconditionally inconclusive leaves the divergence
             # fallback disarmed against an index holding 100 slots while
             # sqlite holds six figures.
             ceiling = _hnsw_capacity_ceiling_from_payload(palace_path, seg_id)
@@ -1688,7 +1688,7 @@ def _hnsw_capacity_status_uncached(
         # (currently 2), so a gap of dozens of rows is far beyond ordinary
         # flush lag. Older palaces may lack the metadata row; keep the
         # historical floor for fresh lag there, but do not let a stale pickle
-        # sit below the floor forever (#1816).
+        # sit below the floor forever.
         if has_explicit_sync_threshold:
             threshold = max(0, 2 * sync_threshold)
         else:
@@ -2004,7 +2004,7 @@ def _sqlite_wing_room_counts(
     the collection**, because opening it cold-loads the HNSW vector index. On
     large palaces that load costs tens of seconds of CPU per call — a steep,
     pointless tax for an inspection command that only needs metadata the
-    relational tables already hold (#1681). Wings/rooms live in plain
+    relational tables already hold. Wings/rooms live in plain
     ``embedding_metadata`` rows, joined to ``embeddings`` on the
     ``(id, key)`` primary key, so the tally is a bounded scan of the metadata
     segment: sub-second warm, a few seconds cold on a multi-GB DB — versus the
@@ -2012,7 +2012,7 @@ def _sqlite_wing_room_counts(
 
     Sibling readers that count the same way: :func:`_sqlite_embedding_count`
     (total only) and ``mcp_server._tool_status_via_sqlite`` (independent
-    wing/room histograms for the #1222 fallback). This one cross-tabulates
+    wing/room histograms for the divergence fallback). This one cross-tabulates
     wing→room to match the ChromaDB ``status()`` output shape.
 
     Notes:
@@ -2033,7 +2033,7 @@ def _sqlite_wing_room_counts(
         conn = open_palace_reader(db_path)
         try:
             # Wait out a transient writer/checkpoint lock rather than falling
-            # straight back to the expensive vector-index path (#1681).
+            # straight back to the expensive vector-index path.
             conn.execute("PRAGMA busy_timeout = 3000")
             # Distinguish "collection never bootstrapped" (-> None, so the
             # caller can show the 'initialized but empty' message) from
@@ -2788,7 +2788,7 @@ def _pin_hnsw_threads(collection) -> None:
 
     Fresh collections set this via ``metadata=`` at creation. Legacy palaces
     built before that change keep the default (parallel insert) and can hit
-    the HNSW race described in #974/#965. ChromaDB's
+    the multi-threaded HNSW insert race. ChromaDB's
     ``collection.modify(configuration=...)`` lets us re-apply ``num_threads=1``
     in memory at load time so every new process is protected.
 
@@ -2860,7 +2860,7 @@ def _missing_dimensionality_appears_recoverable(
     # total_elements_added is monotonic across every add, while id_to_label and
     # label_to_id hold only live elements, so a segment that has had deletions
     # carries total_elements_added > label_count. Require >= (not ==), otherwise
-    # every post-deletion dim-None segment is wrongly quarantined (#1710); the
+    # every post-deletion dim-None segment is wrongly quarantined; the
     # label-map size and bijection checks still reject inconsistent label maps.
     if int(total) < label_count or len(label_to_id) != label_count:
         return False
@@ -3186,7 +3186,7 @@ def _clear_chroma_system_cache() -> bool:
     first. ``clear_system_cache()`` replaces Chroma's system and refcount maps
     without calling ``System.stop()``, so a client still open keeps the segment
     the reset discarded and a later write can persist that stale index over
-    the peer's (#2002).
+    the peer's.
 
     Returns whether Chroma's clear ran. The generation advances either way: a
     caller that already closed its client must not treat the following reopen
@@ -3227,7 +3227,7 @@ def _clear_chroma_system_cache() -> bool:
 
 # How many writes ChromaCollection instances in this process have started.
 # A mine compares it before and after to learn whether it wrote anything, and
-# skips its post-mine quick_check when it did not (#2684). Process-wide rather
+# skips its post-mine quick_check when it did not. Process-wide rather
 # than per palace: a write to another palace in between costs one extra check,
 # never a missed one.
 _write_serial = 0
@@ -3253,7 +3253,7 @@ class ChromaCollection(BaseCollection):
     duration of the underlying chromadb call. This serializes MCP and other
     direct-backend writers against ``mempalace mine`` and against each other,
     closing the race between concurrent writers that triggers ChromaDB's
-    multi-threaded HNSW corruption (#974/#965).
+    multi-threaded HNSW corruption.
 
     The lock is the same primitive used by ``miner.mine()`` so re-entrant
     acquisition from inside the mine pipeline (mine -> _mine_body ->
@@ -3637,7 +3637,7 @@ class ChromaCollection(BaseCollection):
         return rows()
 
     def get_all_metadata(self, where: Optional[dict] = None) -> list[dict]:
-        """Every drawer's metadata in one pass over chroma.sqlite3 (#1796).
+        """Every drawer's metadata in one pass over chroma.sqlite3.
 
         The base implementation pages ``get(limit, offset)``, and Chroma turns
         ``offset`` into SQL ``OFFSET``, which steps over every skipped row, so
@@ -4034,7 +4034,7 @@ class ChromaBackend(BaseBackend):
     * ``self._clients`` — ``palace_path -> PersistentClient`` for callers
       using the ``PalaceRef`` / :meth:`get_collection` path.
     * An inode+mtime freshness check absorbed from ``mcp_server._get_client``
-      (merged via #757) ensuring a palace rebuild on disk is detected on the
+      ensuring a palace rebuild on disk is detected on the
       next :meth:`get_collection` call.
     """
 
@@ -4183,7 +4183,7 @@ class ChromaBackend(BaseBackend):
 
         Handles the palace-rebuild case (repair/nuke/purge) by invalidating the
         cache when ``chroma.sqlite3`` changes on disk. Mirrors the semantics of
-        ``mcp_server._get_client`` (merged via #757):
+        ``mcp_server._get_client``:
 
         * DB file missing while we hold a cached client → drop the cache so we
           do not serve stale data after a rebuild that has not yet re-created
@@ -4264,7 +4264,7 @@ class ChromaBackend(BaseBackend):
             if external_change:
                 ChromaBackend._quarantined_paths.discard(palace_path)
 
-                # #2028/#2375: Chroma's cache reset is process-global and only
+                # Chroma's cache reset is process-global and only
                 # forgets its maps. Close all clients owned by this backend
                 # first, while their close() calls can still decrement the
                 # refcounts and stop the corresponding Systems.
@@ -4352,17 +4352,17 @@ class ChromaBackend(BaseBackend):
 
         1. ``_fix_missing_collection_type`` — adds the ``_type`` marker to
            ``collections.config_json_str`` that chromadb 1.5.9+ requires
-           but <= 1.5.8 never wrote (#1611).
+           but <= 1.5.8 never wrote.
         2. ``_fix_blob_seq_ids`` — repairs the BLOB seq_id quirk that bites
            certain chromadb migrations.
         3. ``quarantine_invalid_hnsw_metadata`` — renames aside any HNSW
            ``index_metadata.pickle`` that fails to load, so chromadb opens
            against an empty index instead of crashing on the unloadable
-           pickle (#1266 / PR #1285).
+           pickle.
         4. ``quarantine_stale_hnsw`` -- gated by :attr:`_quarantined_paths`
            so it fires once per palace until the gate is re-armed by a
            disk change. This is the SIGSEGV prevention path for stale
-           HNSW segments (see #1121, #1132, #1263); wiring it through
+           HNSW segments; wiring it through
            this helper means CLI mining, search, repair, and status all
            benefit, not just the legacy ``make_client`` callers.
 
@@ -4538,7 +4538,7 @@ class ChromaBackend(BaseBackend):
         16-byte ``SQLite format 3\\x00`` magic prefix is written as soon
         as chromadb's ``PersistentClient`` does any work, so this check
         accepts every real chroma palace while rejecting empty / garbage
-        files. See #1893.
+        files.
 
         Probed through :func:`mempalace.backends._magic.has_sqlite_magic`,
         which never opens a plain descriptor on the file -- see that module for

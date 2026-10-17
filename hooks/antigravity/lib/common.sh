@@ -57,7 +57,7 @@ MEMPAL_AGY_LOG="$MEMPAL_STATE_DIR/antigravity_hook.log"
 # ISOLATED environment whose interpreter is NOT the system `python3`.
 # So naively resolving `command -v python3` lands on a system Python
 # that can't import mempalace, the `-m mempalace` probe fails, and
-# mining silently never fires. (This bit a real user on PR #1633.)
+# mining silently never fires.
 #
 # Resolution order — first hit wins:
 #   1. $MEMPAL_PYTHON                         — explicit operator override
@@ -162,7 +162,7 @@ mempal_expand_home() {
     esac
 }
 
-# Print the config directory, resolved the way mempalace.config does (#148):
+# Print the config directory, resolved the way mempalace.config does:
 # $MEMPALACE_CONFIG_DIR, then a ~/.mempalace that holds a real install, then
 # $XDG_CONFIG_HOME/mempalace (absolute values only), then ~/.config/mempalace.
 # Both environment values have a leading "~" expanded first, as in Python.
@@ -195,7 +195,7 @@ mempal_kill_switch_tripped() {
     cfg_dir="$(mempal_config_dir)"
 
     # Palace nuke is the strongest signal: respect it before touching
-    # disk for state, logging, etc. A fresh install since #148 lives in the
+    # disk for state, logging, etc. A fresh install lives in the
     # XDG config dir and has no ~/.mempalace, so either directory passes.
     if [ ! -d "$HOME/.mempalace" ] && [ ! -d "$cfg_dir" ]; then
         return 0

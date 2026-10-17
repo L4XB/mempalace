@@ -229,10 +229,6 @@ class _LocalServer:
         self._module = None
         self._load_error: BaseException | None = None
 
-    @property
-    def loaded(self) -> bool:
-        return self._module is not None
-
     def load(self):
         if self._load_error is not None:
             raise self._load_error

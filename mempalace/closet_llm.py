@@ -293,7 +293,7 @@ def _regenerate_closets_owned(
 
     # Paginate the fetch — a single get(limit=total, ...) blows through
     # SQLite's SQLITE_MAX_VARIABLE_NUMBER (32766) on large palaces and
-    # crashes inside chromadb (see #802, #850, #1073).
+    # crashes inside chromadb.
     by_source: dict = {}
     batch_size = 5000
     offset = 0

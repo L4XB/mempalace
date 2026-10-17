@@ -2147,7 +2147,7 @@ class SQLiteExactBackend(BaseBackend):
         bare ``sqlite3.connect()`` against a missing path leaves a 0-byte file
         behind because the SQLite header is written on the first statement,
         not on connection. The 16-byte ``SQLite format 3\\x00`` magic prefix
-        accepts every real palace while rejecting empty / garbage files. See #1893.
+        accepts every real palace while rejecting empty / garbage files.
 
         The probe goes through :func:`mempalace.backends._magic.has_sqlite_magic`
         and never opens a plain descriptor on the file: ``detect()`` runs on

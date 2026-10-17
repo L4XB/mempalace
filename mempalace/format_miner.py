@@ -182,7 +182,7 @@ class ExtractionStatus(enum.Enum):
 # writes for these would permanently mark the file as "already mined" and
 # defeat re-mining after the missing piece is installed / the network is
 # back. The orchestrator (``mine_formats``) checks this set before calling
-# ``_register_file``. Per PR #1555 review (Copilot #14).
+# ``_register_file``.
 _TRANSIENT_MISSING_DEP_STATUSES = frozenset(
     {
         ExtractionStatus.SKIP_NO_MARKITDOWN,
@@ -304,16 +304,16 @@ def extract_text(
     """
     # Accept str or Path; pathlib handles Windows separators correctly.
     # ``expanduser()`` resolves ``~/foo.pdf`` style paths so CLI inputs work
-    # without forcing the caller to pre-resolve. Per PR #1555 review (Copilot).
+    # without forcing the caller to pre-resolve.
     p = Path(path).expanduser()
 
-    # Fringe Case 7 — broken symlink.
+    # Broken symlink.
     # ``is_symlink()`` true + ``exists()`` false ⇒ link target is missing.
     if p.is_symlink() and not p.exists():
         logger.info("skip:broken_symlink %s", p)
         return None, ExtractionStatus.SKIP_BROKEN_SYMLINK
 
-    # Fringe Case 3 — iCloud cloud-only file. Detect BEFORE stat() so we
+    # iCloud cloud-only file. Detect BEFORE stat() so we
     # don't accidentally trigger an iCloud materialization fetch.
     if is_icloud_dataless(p):
         logger.info("skip:cloud_only %s", p)
@@ -333,7 +333,7 @@ def extract_text(
         # is_symlink() check at the top of this function catches the symlink
         # case BEFORE stat(), so by the time we land here the symlink path
         # is rare — but a race between scan_formats and extract_text on a
-        # plain file is the common cause. Per PR #1555 review (Copilot #8).
+        # plain file is the common cause.
         if p.is_symlink():
             logger.info("skip:broken_symlink (stat) %s", p)
             return None, ExtractionStatus.SKIP_BROKEN_SYMLINK
@@ -343,19 +343,19 @@ def extract_text(
         logger.info("skip:unreadable %s -- %s", p, exc)
         return None, ExtractionStatus.SKIP_UNREADABLE
 
-    # Fringe Case 5 — empty file. Skip silently.
+    # Empty file. Skip silently.
     if stat.st_size == 0:
         logger.debug("skip:empty %s", p)
         return None, ExtractionStatus.SKIP_EMPTY
 
-    # Fringe Case 2 — file exceeds the caller's cap. The default is 500 MB
+    # File exceeds the caller's cap. The default is 500 MB
     # (same as the existing miners). Callers with legitimate large docs
     # raise the cap explicitly.
     if stat.st_size > max_file_size:
         logger.info("skip:too_large %s (%d bytes > %d)", p, stat.st_size, max_file_size)
         return None, ExtractionStatus.SKIP_TOO_LARGE
 
-    # Fringe Case 12 — unrecognized extension. Cheap to check, do it last
+    # Unrecognized extension. Cheap to check, do it last
     # so we still report size / cloud / symlink issues for the obvious cases.
     if p.suffix.lower() not in SUPPORTED_FORMATS:
         logger.debug("skip:unrecognized %s (suffix=%s)", p, p.suffix)
@@ -371,7 +371,7 @@ def extract_text(
         else:
             text = _extract_via_markitdown(p)
     except ImportError:
-        # Fringe Case 1 / 13 — transformer not installed in this env.
+        # Transformer not installed in this env.
         if is_rtf:
             logger.warning(
                 "skip:no_striprtf %s — install with: pip install striprtf",
@@ -384,15 +384,15 @@ def extract_text(
         )
         return None, ExtractionStatus.SKIP_NO_MARKITDOWN
     except TimeoutError:
-        # Fringe Case 11 — network or sync-drive timeout.
+        # Network or sync-drive timeout.
         logger.info("skip:network_timeout %s", p)
         return None, ExtractionStatus.SKIP_NETWORK_TIMEOUT
     except PermissionError:
-        # Fringe Case 6 — permission denied during file read.
+        # Permission denied during file read.
         logger.info("skip:permission %s", p)
         return None, ExtractionStatus.SKIP_PERMISSION
     except Exception as exc:
-        # Fringe Case 14 (PR #1555 review, Igor): MarkItDown raises
+        # MarkItDown raises
         # ``MissingDependencyException`` when a per-format sub-extra
         # (e.g. ``markitdown[pdf]``) isn't installed. Surface this as a
         # distinct status so users see the actionable signal instead of
@@ -408,7 +408,7 @@ def extract_text(
                 str(exc)[:200],
             )
             return None, ExtractionStatus.SKIP_MISSING_FORMAT_DEPS
-        # Fringe Case 4 vs Case 10: encrypted vs generic crash, by message.
+        # Encrypted vs generic crash, by message.
         msg = str(exc)
         if _ENCRYPTED_PATTERNS.search(msg):
             logger.info("skip:encrypted %s -- %s", p, msg[:120])
@@ -448,7 +448,7 @@ def scan_formats(directory: Union[Path, str]) -> list[Path]:
     """
     # ``expanduser().resolve()`` normalizes ``~/docs`` and relative paths so
     # CLI inputs like ``mempalace mine --mode extract ~/docs`` work without
-    # the caller pre-resolving. Per PR #1555 review (Copilot #9).
+    # the caller pre-resolving.
     root = Path(directory).expanduser().resolve()
     if not root.exists():
         return []
@@ -529,7 +529,6 @@ def _register_skip_sentinel_if_appropriate(
     ``SKIP_MISSING_FORMAT_DEPS``, ``SKIP_NETWORK_TIMEOUT``) intentionally do
     NOT mark the file as mined — installing the missing extra later (or
     reconnecting the network) should let the next mine pass pick it up.
-    Per PR #1555 review (Copilot #14).
 
     Only a file that extracted to nothing (``OK`` or ``SKIP_EMPTY``) loses its
     earlier format drawers. A failed extraction keeps the last good text.
@@ -577,7 +576,7 @@ def _register_file(
         "is_sentinel": True,
         # The sentinel names a real source file and ``sync`` reads it as an
         # ordinary drawer, so it needs the identity for the same reason the
-        # file's own drawers do (#2320).
+        # file's own drawers do.
         **identity_metadata(source_file),
     }
     if source_mtime is not None:
@@ -628,7 +627,7 @@ def _file_chunks_locked(
         detect_hall,
     )
 
-    # Tier 6a content-date: extract once per file (not per chunk). Format-mined
+    # Content date: extract once per file (not per chunk). Format-mined
     # files often have date-rich content (RTF/PDF dates in body text, mtimes on
     # the binary source). Caller may pass ``content`` (full extracted text) for
     # the body-scan branch; if absent, the helper still uses filename + mtime.
@@ -643,7 +642,7 @@ def _file_chunks_locked(
         # ``extract_mode="format"`` scopes the idempotency check to format-mode
         # drawers only — drawers from convo_miner / project miner on the same
         # source_file don't falsely indicate "already mined" to the format
-        # miner. Per PR #1555 review (Copilot #12).
+        # miner.
         if file_already_mined(collection, source_file, check_mtime=True, extract_mode="format"):
             return 0, True
 
@@ -669,9 +668,9 @@ def _file_chunks_locked(
             if source_dir_ino:
                 # Which directory this file was read from, so ``sync`` can
                 # tell a neighbour in the same directory from one on a volume
-                # mounted there since (#2320).
+                # mounted there since.
                 meta["source_dir_ino"] = source_dir_ino
-            # Tier 6a — propagate line range from chunk dict into drawer
+            # Propagate line range from chunk dict into drawer
             # metadata so closet pointers can carry "where in source" info.
             # Chunks emitted by older code paths without these keys produce
             # drawers without the keys (graceful fallback).
@@ -679,7 +678,7 @@ def _file_chunks_locked(
                 meta["line_start"] = chunk["line_start"]
             if chunk.get("line_end") is not None:
                 meta["line_end"] = chunk["line_end"]
-            # Tier 6a content-date: shared across all chunks of the file.
+            # Content date: shared across all chunks of the file.
             if file_content_date:
                 meta["content_date"] = file_content_date
                 meta["content_date_source"] = file_content_date_source
@@ -775,13 +774,11 @@ def _mine_formats_impl(
 ) -> None:
     # MempalaceConfig + chunk_text are imported at module level (above) so
     # tests can patch ``mempalace.format_miner.MempalaceConfig`` and
-    # ``mempalace.format_miner.chunk_text`` directly. Hoisted as part of the
-    # PR #1555 polish PR (Gemini #3).
+    # ``mempalace.format_miner.chunk_text`` directly.
 
     # Load palace-wide config. Chunk parameters (chunk_size, chunk_overlap,
     # min_chunk_size) are now threaded through chunk_text below, so users
     # who customized their config see the effect in format-mode mining.
-    # Per PR #1555 review (Gemini #3).
     palace_config = MempalaceConfig(palace_path=palace_path)
     writes_at_start = palace_write_serial()
 
@@ -817,8 +814,7 @@ def _mine_formats_impl(
 
     # Initialize loop-state up-front so the outer try/except handlers and the
     # post-try summary print can run safely even if scan_formats or
-    # get_collection raises before the for loop starts. Per PR #1555 review
-    # (Gemini #5).
+    # get_collection raises before the for loop starts.
     files: list = []
     collection = None
     aaak_col = None
@@ -833,8 +829,7 @@ def _mine_formats_impl(
 
     try:
         # Use the resolved ``format_path``, not the raw ``format_dir``, so that
-        # ``~/docs`` and relative inputs work consistently. Per PR #1555 review
-        # (Copilot #10).
+        # ``~/docs`` and relative inputs work consistently.
         files = scan_formats(format_path)
 
         print(f"\n{'=' * 55}")
@@ -870,8 +865,7 @@ def _mine_formats_impl(
                 # Pass extract_mode="format" so format-mode idempotency is
                 # scoped to its own drawer set — drawers from convo_miner /
                 # project miner on the same source_file don't falsely
-                # indicate "already mined" to the format miner. Per PR #1555
-                # review (Copilot #11).
+                # indicate "already mined" to the format miner.
                 if not dry_run and file_already_mined(
                     collection, source_file, check_mtime=True, extract_mode="format"
                 ):
@@ -896,8 +890,7 @@ def _mine_formats_impl(
                     continue
 
                 # Thread the user's MempalaceConfig chunk parameters through
-                # so format-mode mining honors their tuning. Per PR #1555
-                # review (Gemini #3).
+                # so format-mode mining honors their tuning.
                 chunks = chunk_text(
                     text,
                     source_file,
@@ -997,7 +990,7 @@ def _mine_formats_impl(
                     file=sys.stderr,
                 )
 
-            # End-of-mine FTS5 integrity check (#1537). Mirrors _mine_impl;
+            # End-of-mine FTS5 integrity check. Mirrors _mine_impl;
             # raises MineValidationError to cmd_mine if PRAGMA quick_check
             # finds malformed FTS5 rows so a corrupted palace cannot silently
             # exit Done on the --mode extract path that bypasses _mine_impl.

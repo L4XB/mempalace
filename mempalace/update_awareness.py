@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from .fsio import atomic_publish
+from .fsio import atomic_publish, read_published_bytes
 from .version import __version__
 
 _POLICY_FILE = "updates.json"
@@ -40,7 +40,7 @@ def _config_dir(value=None) -> Path:
 
 def _read_json(name: str, config_dir=None) -> dict:
     try:
-        value = json.loads((_config_dir(config_dir) / name).read_text(encoding="utf-8"))
+        value = json.loads(read_published_bytes(_config_dir(config_dir) / name).decode("utf-8"))
     except (FileNotFoundError, OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
