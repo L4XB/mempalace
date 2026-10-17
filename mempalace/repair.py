@@ -2785,7 +2785,7 @@ def _capacity_with_coverage(palace_path: str, collection_name: str) -> dict:
     other. ``hnsw_capacity_status`` compares the flushed index against
     sqlite and goes quiet when there is no flushed index to compare;
     ``searchable_coverage`` counts the drawers a query can actually reach,
-    which it can do whether or not a flush has ever happened (#2514).
+    which it can do whether or not a flush has ever happened.
 
     Merged into one dict rather than mutating the capacity verdict, which
     is cached and shared with every other caller of that probe.
@@ -2815,8 +2815,8 @@ def status(palace_path=None, collection_name: Optional[str] = None) -> dict:
     :func:`mempalace.backends.chroma.searchable_coverage`, counting the
     live drawers that are either flushed or pending replay — the number
     that separates a healthy unflushed palace from one that has lost its
-    index, which ``status`` alone reports identically as ``unknown``
-    (#2514). ``flush_unreachable`` reaches the operator as its own line
+    index, which ``status`` alone reports identically as ``unknown``.
+    ``flush_unreachable`` reaches the operator as its own line
     for the same reason.
 
     ``status`` itself is deliberately unchanged: MCP gates vector search
@@ -2913,7 +2913,7 @@ def status(palace_path=None, collection_name: Optional[str] = None) -> dict:
         # which is benign on its own — the write log still answers queries.
         # It reaches the operator as its own line rather than only as prose
         # inside note:, so a health check can tell it from a real fault
-        # without parsing English (#2514).
+        # without parsing English.
         if info.get("flush_unreachable"):
             print("    flush:          unreachable at this collection size")
         if info["message"]:

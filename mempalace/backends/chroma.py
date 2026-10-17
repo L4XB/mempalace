@@ -1226,7 +1226,7 @@ def _hnsw_indexed_ids(palace_path: str, segment_id: str) -> Optional[set]:
     zero rather than an unknown. :func:`searchable_coverage` needs the two
     apart, because "nothing flushed yet" is the ordinary state of every
     palace below its ``hnsw:sync_threshold`` and must not stop the
-    measurement (#2514).
+    measurement.
 
     ``None`` is reserved for a pickle that is there but unreadable, where
     counting zero flushed ids would understate coverage and raise a false
@@ -1894,7 +1894,7 @@ def _wal_pending_ids(palace_path: str, collection_name: str) -> Optional[set]:
 def searchable_coverage(
     palace_path: str, collection_name: str = "mempalace_drawers"
 ) -> dict[str, Any]:
-    """Share of live drawers that vector search can actually reach (#2514).
+    """Share of live drawers that vector search can actually reach.
 
     :func:`hnsw_capacity_status` measures the flushed index against sqlite,
     which leaves it with nothing to say whenever ``index_metadata.pickle``
