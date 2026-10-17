@@ -1174,7 +1174,7 @@ def _save_diary_direct(
                 # The daemon runs one job at a time, so a checkpoint submitted
                 # while a mine from an earlier Stop hook still runs waits behind
                 # it. It is filed once that mine ends: not a failure, and not a
-                # reason to write it here as well (#2757).
+                # reason to write it here as well.
                 _log(f"Daemon diary checkpoint still {exc.state}: job {exc.job_id}")
                 return {"drawers_filed": 0, "messages_folded": 0}
             except Exception as exc:
