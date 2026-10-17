@@ -736,7 +736,7 @@ def _wal_unreplayable_count(db_path: str, segment_id: str) -> "int | None":
     watermark: every embedding written below it is absent from the new index
     while its `embedding_metadata` row survives. That is why `collection.count()`
     keeps reporting the full total and an unfiltered search keeps returning
-    confident neighbours over whatever remains (#2510).
+    confident neighbours over whatever remains.
 
     Returns None when the figure cannot be measured. The caller must treat that
     as "nothing to report", never as "nothing was lost".
@@ -882,7 +882,7 @@ def quarantine_stale_hnsw(palace_path: str, stale_seconds: float = 300.0) -> lis
             # survive, so the count and unfiltered search both stay plausible.
             # The documents and metadata stay in SQLite and `mempalace repair`
             # re-embeds from them, so this is a recoverable state that only
-            # needs to stop being silent (#2510).
+            # needs to stop being silent.
             unreplayable = _wal_unreplayable_count(db_path, name)
             if unreplayable:
                 logger.error(
