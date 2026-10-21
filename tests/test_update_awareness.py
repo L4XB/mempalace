@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from mempalace.fsio import read_published_bytes
 from mempalace.update_awareness import (
     cached_update_status,
     check_updates,
@@ -254,7 +255,8 @@ def test_in_flight_check_cannot_restore_withdrawn_consent(tmp_path):
     release_fetch.set()
     deadline = time.monotonic() + 2
     cache_file = tmp_path / "updates-cache.json"
-    while "3.9.0" not in cache_file.read_text(encoding="utf-8"):
+    # The worker publishes over this file while the loop polls it.
+    while b"3.9.0" not in read_published_bytes(cache_file):
         assert time.monotonic() < deadline
         time.sleep(0.01)
 

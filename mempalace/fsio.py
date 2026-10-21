@@ -5,7 +5,7 @@ a name collision and retries ``TMP_MAX`` times (hundreds of thousands, and on
 older Pythons ``os.TMP_MAX``), which reads as a hang. Callers that need the
 permission error — a directory that will take no new name — never see it.
 The opener below retries only ``FileExistsError``, and only
-``TEMP_NAME_ATTEMPTS`` times. (#2530, #2531)
+``TEMP_NAME_ATTEMPTS`` times.
 
 A publish writes a temporary file in the destination directory, fsyncs it,
 then ``os.replace``s it into place and fsyncs the directory. An exception
@@ -25,9 +25,10 @@ import re
 import stat
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple, Union
+
+from .timeutil import filename_stamp
 
 PathLike = Union[str, os.PathLike]
 
@@ -45,6 +46,7 @@ _NO_FSYNC_ERRNOS = tuple(
 # sharing violation). Readers let go quickly, so the rename is retried.
 _SHARING_WINERRORS = (5, 32)
 _REPLACE_BACKOFF = (0.01, 0.05, 0.1, 0.25, 0.5)
+_WINDOWS = os.name == "nt"
 
 
 def unlink_quietly(path: PathLike) -> None:
@@ -99,7 +101,7 @@ def write_target(path: PathLike) -> Path:
     return path
 
 
-def open_new_temp_file(directory: PathLike, prefix: str, suffix: str = ""):
+def open_new_temp_file(directory: PathLike, prefix: str, suffix: str = "", *, mode: int = 0o600):
     """Create one new file under ``directory`` and return ``(fd, path)``.
 
     Only ``FileExistsError`` is retried, and only ``TEMP_NAME_ATTEMPTS``
@@ -111,7 +113,7 @@ def open_new_temp_file(directory: PathLike, prefix: str, suffix: str = ""):
     for _ in range(TEMP_NAME_ATTEMPTS):
         candidate = os.path.join(directory, f"{prefix}{os.urandom(6).hex()}{suffix}")
         try:
-            return os.open(candidate, flags, 0o600), candidate
+            return os.open(candidate, flags, mode), candidate
         except FileExistsError:
             continue
     raise FileExistsError(
@@ -128,13 +130,14 @@ def _chmod_quiet(path: PathLike, mode: int) -> None:
 
 
 def _open_body(target, mode: str, binary: bool):
+    opener = os.fdopen if isinstance(target, int) else open
     if binary:
-        return open(target, mode + "b")
-    return open(target, mode, encoding="utf-8")
+        return opener(target, mode + "b")
+    return opener(target, mode, encoding="utf-8")
 
 
 def write_in_place(
-    path: PathLike, write_body: Callable[[Any], None], *, binary: bool = False
+    path: PathLike, write_body: Callable[[Any], None], *, binary: bool = False, private: bool = True
 ) -> None:
     """Write without a rename, for a directory that refuses a new name.
 
@@ -145,10 +148,13 @@ def write_in_place(
         write_body(handle)
         handle.flush()
         _fsync_file(handle.fileno())
-    _chmod_quiet(path, 0o600)
+    if private:
+        _chmod_quiet(path, 0o600)
 
 
-def _fill_temp(fd: int, tmp: str, write_body: Callable[[Any], None], binary: bool) -> None:
+def _fill_temp(
+    fd: int, tmp: str, write_body: Callable[[Any], None], binary: bool, private: bool
+) -> None:
     """Serialize into ``fd`` and fsync before anything is published.
 
     The mode is set before the write. Under a umask that clears the owner's
@@ -156,8 +162,8 @@ def _fill_temp(fd: int, tmp: str, write_body: Callable[[Any], None], binary: boo
     killed run is then a name its owner cannot open.
     """
     try:
-        _chmod_quiet(tmp, 0o600)
-        os.ftruncate(fd, 0)
+        if private:
+            _chmod_quiet(tmp, 0o600)
         with _open_body(fd, "w", binary) as handle:
             write_body(handle)
             handle.flush()
@@ -167,30 +173,14 @@ def _fill_temp(fd: int, tmp: str, write_body: Callable[[Any], None], binary: boo
         raise
 
 
-def _open_publish_temp(path: Path):
+def _open_publish_temp(path: Path, mode: int):
     """Return ``(fd, tmp)`` for a publish into ``path``.
 
-    The pid-named file is tried first. ``O_NOFOLLOW`` keeps a symlink at that
-    name from being written through. A hard link is not a symlink, so a
-    second link is rejected before the truncate: truncating it would empty a
-    file nobody named here. Anything else in the way of the pid name asks
-    the directory for a name of its own.
+    The file is always new: created ``O_EXCL`` under a random name, so a file
+    or link someone else left in the directory is never reused or written
+    through. A run killed before the rename leaves its file behind.
     """
-    tmp = str(path.with_name(f"{path.name}.tmp-{os.getpid()}"))
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(tmp, flags, 0o600)
-        try:
-            linked = os.fstat(fd).st_nlink > 1
-        except BaseException:
-            os.close(fd)
-            raise
-        if linked:
-            os.close(fd)
-            raise OSError(errno.EMLINK, "temporary name has another link", tmp)
-    except OSError:
-        fd, tmp = open_new_temp_file(path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    return fd, tmp
+    return open_new_temp_file(path.parent, prefix=f".{path.name}.", suffix=".tmp", mode=mode)
 
 
 def _replace(tmp: str, path: Path) -> None:
@@ -205,6 +195,23 @@ def _replace(tmp: str, path: Path) -> None:
     os.replace(tmp, str(path))
 
 
+def read_published_bytes(path: PathLike) -> bytes:
+    """Read a file another thread or process may be publishing over.
+
+    On Windows, opening a file at the moment ``os.replace`` renames over it
+    fails with access denied (EACCES, no ``winerror``). The window is a few
+    milliseconds, so the read is retried; other errors reach the caller.
+    """
+    for delay in _REPLACE_BACKOFF:
+        try:
+            return Path(path).read_bytes()
+        except PermissionError:
+            if not _WINDOWS:
+                raise
+        time.sleep(delay)
+    return Path(path).read_bytes()
+
+
 def _warn_in_place(path: Path, *, why: str) -> None:
     print(
         f"  ! {path.parent} would not take {why}, so {path.name} was "
@@ -214,27 +221,33 @@ def _warn_in_place(path: Path, *, why: str) -> None:
 
 
 def _finish_failed_replace(
-    exc: BaseException, tmp: str, path: Path, write_body: Callable[[Any], None], binary: bool
+    exc: BaseException,
+    tmp: str,
+    path: Path,
+    write_body: Callable[[Any], None],
+    binary: bool,
+    private: bool,
+    in_place: bool,
 ) -> None:
     """Publish in place when the directory itself refused the rename.
 
-    That happens on POSIX when an orphan at the pid name was reused, so the
-    directory first answers at the rename. A Windows error is a file another
-    process still holds after the retries; writing through it would let that
-    reader see a torn file, so it is raised. So is anything not an
-    ``OSError`` (a signal between the write and the rename) and any errno the
-    fallback is not for. The temporary file holds a finished, fsynced copy:
+    A Windows error is a file another process still holds after the retries;
+    writing through it would let that reader see a torn file, so it is
+    raised. So is anything not an ``OSError`` (a signal between the write and
+    the rename), any errno the fallback is not for, and every failure when
+    ``in_place`` is off. The temporary file holds a finished, fsynced copy:
     it is removed only after the in-place write returns.
     """
     if (
-        not isinstance(exc, OSError)
+        not in_place
+        or not isinstance(exc, OSError)
         or exc.errno not in _IN_PLACE_ERRNOS
         or getattr(exc, "winerror", None) is not None
     ):
         unlink_quietly(tmp)
         raise exc
     try:
-        write_in_place(path, write_body, binary=binary)
+        write_in_place(path, write_body, binary=binary, private=private)
     except BaseException:
         print(
             f"  ! {path.name} was not written and may have been truncated; "
@@ -253,43 +266,64 @@ def _finish_failed_replace(
 
 
 def atomic_publish(
-    path: PathLike, write_body: Callable[[Any], None], *, binary: bool = False
+    path: PathLike,
+    write_body: Callable[[Any], None],
+    *,
+    binary: bool = False,
+    private: bool = True,
+    follow_symlinks: bool = True,
 ) -> None:
     """Replace ``path`` with what ``write_body`` writes, or leave it untouched.
 
     ``write_body`` gets a UTF-8 text handle, or a bytes handle when
-    ``binary`` is set (no newline translation). The write falls back to ``write_in_place`` only when the directory
-    refuses a new name (``EACCES``, ``EPERM``, ``EROFS``) while the
-    destination itself may still be writable. Every other failure propagates
-    and does not truncate ``path``.
+    ``binary`` is set (no newline translation). The file is 0600 unless
+    ``private`` is false, which leaves the mode to the umask as a plain
+    ``open()`` does. With ``follow_symlinks`` false a link at ``path`` is
+    replaced rather than written through, and there is no in-place fallback,
+    since writing in place would follow it. Otherwise the write falls back to
+    ``write_in_place`` only when the directory refuses a new name (``EACCES``,
+    ``EPERM``, ``EROFS``) while the destination itself may still be writable.
+    Every other failure propagates and does not truncate ``path``.
     """
-    path = write_target(path)
+    path = write_target(path) if follow_symlinks else Path(path)
+    mode = 0o600 if private else 0o666
     try:
-        fd, tmp = _open_publish_temp(path)
+        fd, tmp = _open_publish_temp(path, mode)
     except OSError as exc:
-        if exc.errno not in _IN_PLACE_ERRNOS:
+        if not follow_symlinks or exc.errno not in _IN_PLACE_ERRNOS:
             raise
-        write_in_place(path, write_body, binary=binary)
+        write_in_place(path, write_body, binary=binary, private=private)
         _warn_in_place(path, why="a temporary file")
         return
 
-    _fill_temp(fd, tmp, write_body, binary)
+    _fill_temp(fd, tmp, write_body, binary, private)
     try:
         _replace(tmp, path)
     except BaseException as exc:
-        _finish_failed_replace(exc, tmp, path, write_body, binary)
+        _finish_failed_replace(exc, tmp, path, write_body, binary, private, follow_symlinks)
         return
     fsync_directory(path.parent)
 
 
-def atomic_write_json(path: PathLike, payload: Any) -> None:
+def atomic_write_json(
+    path: PathLike, payload: Any, *, private: bool = True, follow_symlinks: bool = True
+) -> None:
     """Serialize ``payload`` (indented, UTF-8, non-ASCII kept) into ``path``."""
-    atomic_publish(path, lambda handle: json.dump(payload, handle, indent=2, ensure_ascii=False))
+    atomic_publish(
+        path,
+        lambda handle: json.dump(payload, handle, indent=2, ensure_ascii=False),
+        private=private,
+        follow_symlinks=follow_symlinks,
+    )
 
 
-def atomic_write_text(path: PathLike, text: str) -> None:
+def atomic_write_text(
+    path: PathLike, text: str, *, private: bool = True, follow_symlinks: bool = True
+) -> None:
     """Replace ``path`` with ``text``. Same crash rules as ``atomic_write_json``."""
-    atomic_publish(path, lambda handle: handle.write(text))
+    atomic_publish(
+        path, lambda handle: handle.write(text), private=private, follow_symlinks=follow_symlinks
+    )
 
 
 def atomic_write_bytes(path: PathLike, data: bytes) -> None:
@@ -361,7 +395,7 @@ def move_aside(path: PathLike, *, label: str) -> Optional[str]:
     raises: a file that could not be moved is not one to write over.
     """
     path = write_target(path)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = filename_stamp()
     fd, target = open_new_temp_file(path.parent, prefix=f"{path.name}.{label}-{stamp}-")
     os.close(fd)
     try:
@@ -504,7 +538,7 @@ def read_source_text(path: PathLike, *, max_bytes: int) -> Tuple[str, str, float
     """Read a source file whole: ``(text, encoding, mtime)``.
 
     The mtime comes from the ``fstat`` taken before the read, so a caller
-    never stamps text with the mtime of a later append (#22). Newlines are
+    never stamps text with the mtime of a later append. Newlines are
     read as in text mode; see ``decode_source`` for the decoding. Raises
     ``OSError`` for a symlink, a non-regular file, or more than ``max_bytes``.
     """

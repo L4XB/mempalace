@@ -16,12 +16,7 @@ import sys
 from typing import Any
 
 from .config import MempalaceConfig
-from .tool_capabilities import (  # noqa: F401  (re-exported for callers and tests)
-    MAINTENANCE_TOOLS,
-    READ_TOOLS,
-    WRITE_TOOLS,
-    classify_tool,
-)
+from .tool_capabilities import classify_tool
 
 _EXPLICIT_BACKEND_ENV = "MEMPALACE_BACKEND_EXPLICIT"
 _PALACE_PATH_ENV = "MEMPALACE_PALACE_PATH"
@@ -224,6 +219,9 @@ def run_mine(payload: dict[str, Any]) -> dict[str, Any]:
                 source_path=source,
                 palace_path=palace_path,
                 dry_run=dry_run,
+                project=wing,
+                related_drawer_id=payload.get("related_drawer_id"),
+                explicit_palace=bool(payload.get("explicit_palace")),
             )
         elif mode == "convos":
             from .convo_miner import mine_convos

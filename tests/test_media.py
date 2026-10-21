@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from mempalace.media import MediaAssetError, asset_from_path, media_asset_exists, store_media_asset
+from mempalace.media import MediaAssetError, asset_from_path, store_media_asset
 from mempalace.sources.base import SourceRef
 from mempalace.sources.media import MediaAdapter
 
@@ -373,9 +373,7 @@ def test_media_reference_survives_missing_file_check(tmp_path):
     path = tmp_path / "image.png"
     path.write_bytes(b"image")
     asset = asset_from_path(path, source_root=tmp_path, media_type="image", project="demo")
-    assert media_asset_exists(asset)
     path.unlink()
-    assert not media_asset_exists(asset)
     assert asset.metadata()["file_exists"] is True
 
 

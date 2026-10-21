@@ -25,7 +25,7 @@ def _internal_tool_error(
 
 
 def _mcp_read_only_refusal(req_id, tool_name: str):
-    """Refuse state-changing tools when the server runs in read-only mode (#1877).
+    """Refuse state-changing tools when the server runs in read-only mode.
 
     Read-only is an operator-set server mode (``--read-only`` /
     ``MEMPALACE_MCP_READ_ONLY``), distinct from the dynamic peer-writer lock:
@@ -54,7 +54,7 @@ def _mcp_read_only_refusal(req_id, tool_name: str):
 def _mcp_diverged_index_refusal(req_id, tool_name: str):
     """Refuse vector writes while the HNSW segment is known to be diverged.
 
-    The capacity probe (#1222) already routes *reads* around a diverged index:
+    The capacity probe already routes *reads* around a diverged index:
     ``search`` and ``check_duplicate`` fall back to BM25-only sqlite. Writes had
     no such gate — they went straight to chromadb, where an upsert into that same
     index can never come back. Observed on a 3.7.0 palace whose flushed segment
@@ -555,13 +555,13 @@ def _stale_library_payload() -> dict:
             )
     if inactive:
         payload["unreadable"] = inactive
-    if drift and _truthy_env(_MCP_ALLOW_STALE_LIBRARY_ENV):
+    if drift and env_bool(_MCP_ALLOW_STALE_LIBRARY_ENV, False):
         payload["gate_disabled_by"] = _MCP_ALLOW_STALE_LIBRARY_ENV
     return payload
 
 
 def _mcp_stale_library_refusal(req_id, tool_name: str):
-    """Refuse mutating tools once the served code is no longer what is installed (#899).
+    """Refuse mutating tools once the served code is no longer what is installed.
 
     Reads stay available on purpose: the palace itself is intact at this point,
     and a user who has just been told to restart still needs ``status`` and
@@ -575,7 +575,7 @@ def _mcp_stale_library_refusal(req_id, tool_name: str):
     if tool_name not in _MUTATING_TOOLS:
         return None
 
-    if _truthy_env(_MCP_ALLOW_STALE_LIBRARY_ENV):
+    if env_bool(_MCP_ALLOW_STALE_LIBRARY_ENV, False):
         return None
 
     drift, _unreadable = _stale_library_report()
@@ -1041,14 +1041,14 @@ def handle_request(request):
                 "serverInfo": {"name": "mempalace", "version": __version__},
             },
         }
-    elif method == "ping":
+    if method == "ping":
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
-    elif method.startswith("notifications/"):
+    if method.startswith("notifications/"):
         # Notifications (no id) never get a response per JSON-RPC spec
         return None
-    elif method == "tools/list":
+    if method == "tools/list":
         # In read-only mode, hide the refused tools so clients don't advertise
-        # write capabilities they can't use (dispatch also refuses them, #1877).
+        # write capabilities they can't use (dispatch also refuses them).
         # Same set on both sides, or a tool would be listed and then rejected.
         return {
             "jsonrpc": "2.0",
@@ -1061,7 +1061,7 @@ def handle_request(request):
                 ]
             },
         }
-    elif method == "tools/call":
+    if method == "tools/call":
         refusal, result = call_tool(req_id, params)
         return refusal if refusal is not None else _tool_call_response(req_id, result)
 
@@ -1072,7 +1072,7 @@ def handle_request(request):
 
 
 def _restore_stdout():
-    """Restore real stdout for MCP JSON-RPC output (see issue #225)."""
+    """Restore real stdout for MCP JSON-RPC output."""
     global _REAL_STDOUT, _REAL_STDOUT_FD
     if _REAL_STDOUT_FD is not None:
         try:
@@ -1084,8 +1084,6 @@ def _restore_stdout():
     sys.stdout = _REAL_STDOUT
 
 
-_WARMUP_TRUTHY = {"1", "true", "yes", "on"}
-_WARMUP_FALSY = {"", "0", "false", "no", "off"}
 # Sentinel text for the warmup query. Distinctive so it cannot semantically
 # match real drawer content (e.g. a palace containing notes about "warmup"
 # routines) and is greppable in chromadb debug logs if the team ever adds
@@ -1117,7 +1115,7 @@ def _maybe_eager_warmup_embedder() -> None:
     ``add_drawer``, ``search``) otherwise pays two compounding cold-load
     costs that together can exceed the MCP client timeout and surface as
     ``-32000`` "Internal tool error" with no recoverable trace on the
-    agent side (#1495):
+    agent side:
 
     1. ONNX/CoreML embedder init in :func:`mempalace.embedding.get_embedding_function`
        (5–30s on first inference; ChromaDB's ``ONNXMiniLM_L6_V2.__call__``
@@ -1126,9 +1124,9 @@ def _maybe_eager_warmup_embedder() -> None:
        first collection operation; seconds on palaces of 50k+ drawers).
 
     Warming via :func:`_get_collection`'s collection-then-query path
-    covers BOTH in a single startup-phase call — mirroring the reporter's
-    proposal in #1495 — so users with large existing palaces see the
-    same benefit as users on the embedder-only cost path.
+    covers BOTH in a single startup-phase call, so users with large
+    existing palaces see the same benefit as users on the embedder-only
+    cost path.
 
     Truthy parsing accepts ``1/true/yes/on`` (case-insensitive); falsy
     set ``0/false/no/off`` and empty/whitespace are silently off; any
@@ -1170,16 +1168,9 @@ def _maybe_eager_warmup_embedder() -> None:
     has zero cold-load cost; nothing was skipped that the first real tool
     call would have paid.
     """
-    raw = os.environ.get("MEMPALACE_EAGER_WARMUP", "").strip().lower()
-    if raw in _WARMUP_FALSY:
+    if not env_bool("MEMPALACE_EAGER_WARMUP", False):
         return
-    if raw not in _WARMUP_TRUTHY:
-        logger.warning(
-            "MEMPALACE_EAGER_WARMUP=%r is not recognized (use one of %s); warmup disabled",
-            raw,
-            sorted(_WARMUP_TRUTHY | (_WARMUP_FALSY - {""})),
-        )
-        return
+    raw = env_str("MEMPALACE_EAGER_WARMUP")
     palace_path = _config.palace_path
     try:
         backend_name = _selected_backend_name()
@@ -1254,19 +1245,13 @@ _WRITE_STALL_EXIT_DEFAULT = 0.0
 _WRITE_STALL_EXIT_CODE = 75
 
 _write_stall_lock = threading.Lock()
-# Optional[dict]: {"tool": str, "since": float(monotonic), "warned": bool}
+# None, or the write in flight: its tool name, its monotonic start time
+# ("since") and whether a stall warning was already logged ("warned").
 _write_stall_inflight: Optional[dict] = None
 
 
 def _write_stall_secs(env_name: str, default: float) -> float:
-    raw = os.environ.get(env_name, "")
-    if not raw.strip():
-        return default
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        logger.warning("%s=%r is not a number; using %.0fs", env_name, raw, default)
-        return default
+    return max(0.0, env_float(env_name, default))
 
 
 def _write_stall_action(elapsed: float, warn_secs: float, exit_secs: float, warned: bool):
@@ -1372,17 +1357,17 @@ def _start_write_stall_watchdog() -> None:
 def _exit_running_registered_cleanup() -> None:
     """Exit the process from a daemon thread, WITH the `atexit` handlers.
 
-    `os._exit` alone skipped them, so the idle watchdog left
-    `serverinfo.json` advertising a dead PID -- measured in #2500 at 2 days
-    8 hours of a stale record. Two handlers are registered by the time this
+    `os._exit` alone skips them, so the idle watchdog would leave
+    `serverinfo.json` advertising a dead PID for days. Two handlers are
+    registered by the time this
     can fire: `server_registry.clear_serverinfo` (http.py) and
     `_release_mcp_writer_lock` (_guards.py).
 
-    NOT `sys.exit(0)`, which #2500 suggests. This runs in a DAEMON THREAD,
+    NOT `sys.exit(0)`. This runs in a DAEMON THREAD,
     where `SystemExit` unwinds that thread and nothing else -- measured: the
     process stays alive and the watchdog, having returned out of its own
     loop, never fires again. That trades a stale `serverinfo.json` for the
-    file-handle accumulation the watchdog exists to prevent (#1552).
+    file-handle accumulation the watchdog exists to prevent.
 
     `atexit._run_exitfuncs` is private, and deliberate: the public surface
     has no "run the handlers now" and the alternative -- calling the two
@@ -1406,7 +1391,7 @@ def _start_idle_exit_watchdog() -> None:
     When no request has been handled for ``MEMPALACE_MCP_IDLE_HOURS``
     (default 8 h), the thread terminates the process so that stale MCP
     servers from ended Claude Code sessions do not accumulate ChromaDB /
-    HNSW file handles on Windows (#1552).
+    HNSW file handles on Windows.
 
     Set ``MEMPALACE_MCP_IDLE_HOURS=0`` to disable the watchdog.
     """

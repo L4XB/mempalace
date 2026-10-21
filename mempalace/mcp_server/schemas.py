@@ -330,7 +330,8 @@ TOOLS = {
                     "description": (
                         "Only drawers filed on/after this ISO date or datetime "
                         "(inclusive), e.g. '2026-04-01' or '2026-04-01T09:30:00'. "
-                        "Compares the drawer's created_at (filed_at) wall-clock; "
+                        "A value without an offset is local time. Compares the "
+                        "drawer's created_at (filed_at) as an instant; "
                         "drawers without a filed_at are excluded while set."
                     ),
                 },
@@ -572,7 +573,7 @@ TOOLS = {
         "handler": tool_mine,
     },
     "mempalace_delete_by_source": {
-        "description": "Bulk-delete every drawer mined from one source_file (exact match). Use to clean up benchmark/test data accidentally mined into a user wing (#1722). Returns a dry-run match count and sample by default; pass dry_run=false to commit. Irreversible; a commit also removes those drawers' earlier revisions.",
+        "description": "Bulk-delete every drawer mined from one source_file (exact match). Use to clean up benchmark/test data accidentally mined into a user wing. Returns a dry-run match count and sample by default; pass dry_run=false to commit. Irreversible; a commit also removes those drawers' earlier revisions.",
         "input_schema": {
             "type": "object",
             "properties": {

@@ -49,7 +49,6 @@ def _query_drawers_with_filter_fallback(
     drawers are ingested via two different paths (e.g. bulk import vs MCP tool
     calls), leaving the vector index inconsistent with the metadata store. We
     retry unfiltered (over-fetching) and re-apply the wing/room/source_file filter in Python.
-    See #1245 / #1035.
     """
     where = dkwargs.get("where")
     try:
@@ -69,6 +68,7 @@ def _query_drawers_with_filter_fallback(
         raw_docs = _first_or_empty(raw, "documents")
         raw_ids = _aligned_query_ids(raw, len(raw_docs))
         fids, fdocs, fmetas, fdists = [], [], [], []
+        wings = set(palace_wing_aliases(wing, drawers_col)) if wing else None
         for stored_drawer_id, doc, meta, dist in zip(
             raw_ids,
             raw_docs,
@@ -76,7 +76,7 @@ def _query_drawers_with_filter_fallback(
             _first_or_empty(raw, "distances"),
         ):
             meta = meta or {}
-            if wing and meta.get("wing") != wing:
+            if wings and meta.get("wing") not in wings:
                 continue
             if room and meta.get("room") != room:
                 continue
@@ -221,11 +221,11 @@ def search_memories(
         wing: Optional wing filter.
         room: Optional room filter.
         source_file: Optional exact source_file filter. Matches the full
-            stored source_file value verbatim (#1815).
+            stored source_file value verbatim.
         since: Optional inclusive ISO date/datetime lower bound on a
             drawer's ``filed_at`` (ingest time, the ``created_at`` shown in
             results) — ``[since, before)`` window semantics shared with
-            ``list_drawers`` (#1128): wall-clock naive comparison, drawers
+            ``list_drawers``: compared as instants (see ``date_window``), drawers
             with missing/unparseable ``filed_at`` excluded while a bound is
             active. Filtering happens after retrieval (ChromaDB rejects
             string operands for ``$gte``/``$lt``), so the candidate pool is
@@ -238,8 +238,8 @@ def search_memories(
             ``ip`` distances are converted before comparing). Candidates past
             it are dropped and counted in ``filtered_by_max_distance``.
             ``None`` (the default), ``0`` or a negative value applies no cutoff.
-        vector_disabled: When True, route to the sqlite-only BM25 fallback
-            (#1222). Set by the MCP server when the HNSW capacity probe
+        vector_disabled: When True, route to the sqlite-only BM25 fallback.
+            Set by the MCP server when the HNSW capacity probe
             detects a divergence that would segfault chromadb on segment
             load.
         candidate_strategy: How candidates for the hybrid re-rank are gathered.
@@ -319,7 +319,7 @@ def search_memories(
         return open_error
 
     metric = _metric_for_collection(drawers_col)
-    where = build_where_filter(wing, room, source_file)
+    where = build_where_filter(wing, room, source_file, col=drawers_col)
 
     # Hybrid retrieval: always query drawers directly (the floor), then use
     # closet hits to boost rankings. Closets are a ranking SIGNAL, never a

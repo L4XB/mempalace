@@ -10,7 +10,6 @@ from mempalace.config import (
     _default_config_dir,
     connect_sqlite_read,
     normalize_wing_name,
-    sanitize_iso_date,
     sanitize_iso_temporal,
     sanitize_kg_value,
     sanitize_name,
@@ -625,70 +624,70 @@ def test_kg_value_rejects_over_length():
         sanitize_kg_value("a" * 129)
 
 
-# --- sanitize_iso_date ---
+# --- sanitize_iso_temporal (date-only inputs) ---
 
 
 def test_iso_date_rejects_year_only():
     # Partial dates re-introduce silent empty result sets via lexicographic
     # TEXT comparison in KG queries (e.g. "2026-01-01" <= "2026" is False).
     with pytest.raises(ValueError):
-        sanitize_iso_date("2026")
+        sanitize_iso_temporal("2026")
 
 
 def test_iso_date_rejects_year_month():
     with pytest.raises(ValueError):
-        sanitize_iso_date("2026-03")
+        sanitize_iso_temporal("2026-03")
 
 
 def test_iso_date_accepts_full_date():
-    assert sanitize_iso_date("2026-03-15") == "2026-03-15"
+    assert sanitize_iso_temporal("2026-03-15") == "2026-03-15"
 
 
 def test_iso_date_passes_through_none():
-    assert sanitize_iso_date(None) is None
+    assert sanitize_iso_temporal(None) is None
 
 
 def test_iso_date_passes_through_empty_string():
-    assert sanitize_iso_date("") == ""
+    assert sanitize_iso_temporal("") == ""
 
 
 def test_iso_date_strips_whitespace():
-    assert sanitize_iso_date("  2026-03-15  ") == "2026-03-15"
+    assert sanitize_iso_temporal("  2026-03-15  ") == "2026-03-15"
 
 
 def test_iso_date_rejects_natural_language():
     with pytest.raises(ValueError):
-        sanitize_iso_date("March 2026")
+        sanitize_iso_temporal("March 2026")
 
 
 def test_iso_date_rejects_abbreviated_month():
     with pytest.raises(ValueError):
-        sanitize_iso_date("Jan 2025")
+        sanitize_iso_temporal("Jan 2025")
 
 
 def test_iso_date_rejects_us_format():
     with pytest.raises(ValueError):
-        sanitize_iso_date("03/15/2026")
+        sanitize_iso_temporal("03/15/2026")
 
 
 def test_iso_date_rejects_invalid_month():
     with pytest.raises(ValueError):
-        sanitize_iso_date("2026-13")
+        sanitize_iso_temporal("2026-13")
 
 
 def test_iso_date_rejects_invalid_day():
     with pytest.raises(ValueError):
-        sanitize_iso_date("2026-02-32")
+        sanitize_iso_temporal("2026-02-32")
 
 
 def test_iso_date_rejects_non_string():
     with pytest.raises(ValueError):
-        sanitize_iso_date(20260315)
+        sanitize_iso_temporal(20260315)
 
 
 def test_iso_date_error_names_field():
     with pytest.raises(ValueError, match="valid_from"):
-        sanitize_iso_date("yesterday", "valid_from")
+        sanitize_iso_temporal("yesterday", "valid_from")
 
 
 def test_iso_temporal_accepts_full_date():
@@ -704,7 +703,7 @@ def test_iso_temporal_strips_datetime_whitespace():
 
 
 def test_iso_date_backward_compatible_wrapper_accepts_datetime():
-    assert sanitize_iso_date("2026-05-06T14:23:00Z") == "2026-05-06T14:23:00Z"
+    assert sanitize_iso_temporal("2026-05-06T14:23:00Z") == "2026-05-06T14:23:00Z"
 
 
 def test_iso_temporal_rejects_datetime_without_seconds():
@@ -1503,8 +1502,8 @@ def test_init_leaves_defaults_out_so_later_defaults_apply(tmp_path, monkeypatch)
     MempalaceConfig(config_dir=str(tmp_path)).init()
     import mempalace.config as config_module
 
-    monkeypatch.setattr(config_module, "DEFAULT_TOPIC_WINGS", ["only_this_wing"])
-    assert MempalaceConfig(config_dir=str(tmp_path)).topic_wings == ["only_this_wing"]
+    monkeypatch.setattr(config_module, "DEFAULT_HALL_KEYWORDS", {"only_this_hall": ["x"]})
+    assert MempalaceConfig(config_dir=str(tmp_path)).hall_keywords == {"only_this_hall": ["x"]}
 
 
 def test_init_records_an_explicit_palace_path(tmp_path):

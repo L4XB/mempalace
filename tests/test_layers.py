@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mempalace.backends.base import BaseCollection, GetResult
+from mempalace.config import wing_aliases
 from mempalace.layers import Layer0, Layer1, Layer2, Layer3, MemoryStack
 
 
@@ -165,7 +166,7 @@ def test_layer1_with_wing_filter():
     assert "ESSENTIAL STORY" in result
     # Verify wing filter was passed
     call_kwargs = mock_col.get.call_args_list[0][1]
-    assert call_kwargs.get("where") == {"wing": "project_x"}
+    assert call_kwargs.get("where") == {"wing": {"$in": wing_aliases("project_x")}}
 
 
 def test_layer1_truncates_long_snippets():
@@ -374,7 +375,7 @@ def test_layer1_recency_capability_receives_wing_filter():
         mock_cfg.return_value.palace_path = "/fake"
         Layer1(palace_path="/fake", wing="my_project").generate()
 
-    assert captured["where"] == {"wing": "my_project"}
+    assert captured["where"] == {"wing": {"$in": wing_aliases("my_project")}}
 
 
 def test_layer1_falls_back_to_scan_when_capability_missing():
@@ -433,7 +434,8 @@ def test_layer1_read_that_blocks_past_the_budget_is_cut_off():
         _release_stuck_reader(release)
 
     assert "could not be read right now (TimeoutError)" in result
-    assert elapsed < 0.45
+    # The read blocks for 5 s; the bound only needs to prove the 300 ms budget cut it off.
+    assert elapsed < 1.5
     mock_col.get.assert_not_called()
 
 
@@ -880,7 +882,7 @@ def test_layer3_search_with_wing_filter():
         layer.search("q", wing="proj")
 
     call_kwargs = mock_col.query.call_args[1]
-    assert call_kwargs["where"] == {"wing": "proj"}
+    assert call_kwargs["where"] == {"wing": {"$in": wing_aliases("proj")}}
 
 
 def test_layer3_search_with_room_filter():

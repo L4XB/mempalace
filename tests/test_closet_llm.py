@@ -7,6 +7,7 @@ These tests don't hit the network. They mock urllib to verify:
 - response parsing handles the standard chat-completions payload
 """
 
+import io
 import json
 import os
 import subprocess
@@ -146,7 +147,7 @@ class TestCallLLM:
                 }
             )
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen):
             parsed, usage = _call_llm(cfg, "/tmp/test.md", "w", "r", "content body")
 
         assert parsed["topics"] == ["postgres"]
@@ -171,7 +172,7 @@ class TestCallLLM:
                 }
             )
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen):
             _call_llm(cfg, "/tmp/x", "w", "r", "c")
 
         assert "authorization" not in captured_headers
@@ -188,9 +189,43 @@ class TestCallLLM:
                 }
             )
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen):
             parsed, _ = _call_llm(cfg, "/tmp/x", "w", "r", "c")
         assert parsed == {"topics": ["t1"], "quotes": [], "summary": ""}
+
+    def test_a_reply_of_the_wrong_shape_is_retried_then_dropped(self):
+        """An object without ``topics`` (a quoted code snippet, say) must never
+        replace the regex closets: it counts as a failed parse."""
+        cfg = self._make_cfg()
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req)
+            return _FakeResp({"choices": [{"message": {"content": '{"debug": true}'}}]})
+
+        with (
+            patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen),
+            patch("mempalace.closet_llm.time.sleep"),
+        ):
+            assert _call_llm(cfg, "/tmp/x", "w", "r", "c") == (None, None)
+        assert len(calls) == 3
+
+    def test_a_400_is_not_retried_even_when_its_body_mentions_generate(self):
+        from urllib.error import HTTPError
+
+        cfg = self._make_cfg()
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req)
+            raise HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b"cannot generate"))
+
+        with (
+            patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen),
+            patch("mempalace.closet_llm.time.sleep"),
+        ):
+            assert _call_llm(cfg, "/tmp/x", "w", "r", "c") == (None, None)
+        assert len(calls) == 1
 
     def test_returns_none_on_invalid_json(self):
         cfg = self._make_cfg()
@@ -204,7 +239,7 @@ class TestCallLLM:
             )
 
         with (
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen),
             patch("mempalace.closet_llm.time.sleep"),
         ):
             parsed, _ = _call_llm(cfg, "/tmp/x", "w", "r", "c")
@@ -224,7 +259,7 @@ class TestCallLLM:
             )
 
         with (
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen),
             patch("mempalace.closet_llm.time.sleep"),
         ):
             parsed, _ = _call_llm(cfg, "/tmp/x", "w", "r", "c")
@@ -376,7 +411,7 @@ with mine_palace_lock(sys.argv[1]):
                 }
             )
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen):
             result = regenerate_closets(palace, cfg=cfg)
 
         assert result["processed"] == 1 and result["failed"] == 0
@@ -466,7 +501,7 @@ with mine_palace_lock(sys.argv[1]):
             patch.object(closet_llm_mod, "get_closets_collection", return_value=fake_closets),
             patch.object(closet_llm_mod, "purge_file_closets", return_value=None),
             patch.object(closet_llm_mod, "upsert_closet_lines", return_value=None),
-            patch("urllib.request.urlopen", side_effect=fake_urlopen),
+            patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen),
         ):
             result = regenerate_closets(palace, cfg=cfg, dry_run=True)
 
@@ -600,7 +635,7 @@ with mine_palace_lock(sys.argv[1]):
                 }
             )
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen):
             regenerate_closets(palace, cfg=cfg)
 
         closets = get_closets_collection(palace)
@@ -625,7 +660,7 @@ class TestNoSilentExternal:
             raise AssertionError("contacted a generic LLM_ENDPOINT")
 
         cfg = LLMConfig()
-        with patch("urllib.request.urlopen", side_effect=boom):
+        with patch("mempalace.llm_client.urlopen", side_effect=boom):
             parsed, usage = _call_llm(cfg, "notes.md", "w", "r", "drawer text")
         assert parsed is None and usage is None
         assert cfg.missing()
@@ -651,7 +686,7 @@ class TestNoSilentExternal:
         def boom(*_args, **_kwargs):
             raise AssertionError("contacted a non-local endpoint")
 
-        with patch("urllib.request.urlopen", side_effect=boom):
+        with patch("mempalace.llm_client.urlopen", side_effect=boom):
             parsed, _usage = _call_llm(cfg, "notes.md", "w", "r", "secret drawer text")
             result = regenerate_closets("/tmp/does-not-matter", cfg=cfg)
         assert parsed is None
@@ -677,7 +712,7 @@ class TestNoSilentExternal:
                 }
             )
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("mempalace.llm_client.urlopen", side_effect=fake_urlopen):
             parsed, _usage = _call_llm(cfg, "notes.md", "w", "r", "drawer text")
         assert called["url"] == "https://api.openai.com/v1/chat/completions"
         assert parsed["topics"] == ["t"]

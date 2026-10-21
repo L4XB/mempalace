@@ -175,8 +175,19 @@ def cmd_hallways(args):
         print(f"    {label}")
 
 
+def cmd_export(args):
+    from ..exporter import export_palace
+
+    palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    export_palace(palace_path, os.path.expanduser(args.output_dir))
+
+
 def cmd_status(args):
+    from ..knowledge_graph import knowledge_graph_notice
     from ..miner import status
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
     status(palace_path=palace_path)
+    notice = knowledge_graph_notice(palace_path, explicit=bool(args.palace))
+    if notice:
+        print(f"\n  Note: {notice}")

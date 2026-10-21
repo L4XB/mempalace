@@ -173,19 +173,11 @@ def test_http_answers_another_mempalace_process_exactly(stray_server):
 
 
 def test_hub_client_round_trips_a_stray_byte_exactly(stray_server):
-    from mempalace.hub_client import forward_json_rpc, hub_request_headers
+    from mempalace.hub_client import HubClient
 
     port, drawer_id = stray_server
-    response = forward_json_rpc(
-        f"http://127.0.0.1:{port}",
-        hub_request_headers(),
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "mempalace_get_drawer", "arguments": {"drawer_id": drawer_id}},
-        },
-    )
+    hub = HubClient("/p", {"host": "127.0.0.1", "port": port})
+    response = hub.call_tool("mempalace_get_drawer", {"drawer_id": drawer_id})
     assert json.loads(response["result"]["content"][0]["text"])["content"] == STRAY_TEXT
 
 

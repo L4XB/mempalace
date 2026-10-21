@@ -38,9 +38,10 @@ from .query_parser import (  # noqa: E402
     parse_query_input,
 )
 from .search_util import _cosine_scale_distance  # noqa: E402
+from .timeutil import recency_key  # noqa: E402
 from .version import __version__  # noqa: E402
 
-logger = logging.getLogger("mempalace_mcp_light")
+logger = logging.getLogger(__name__)
 
 _PQL_KEYWORDS = {
     "FIND",
@@ -197,7 +198,7 @@ def _enrich_search_results(res: Dict[str, Any]) -> Dict[str, Any]:
 
     by_recency = sorted(
         range(len(results_list)),
-        key=lambda i: _search_timestamp(results_list[i]),
+        key=lambda i: recency_key(_search_timestamp(results_list[i])),
         reverse=True,
     )
     for recency_rank, orig_i in enumerate(by_recency, 1):
@@ -759,11 +760,11 @@ def handle_light_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 "serverInfo": {"name": "mempalace-light", "version": __version__},
             },
         }
-    elif method == "ping":
+    if method == "ping":
         return {"jsonrpc": "2.0", "id": req_id, "result": {}}
-    elif method.startswith("notifications/"):
+    if method.startswith("notifications/"):
         return None
-    elif method == "tools/list":
+    if method == "tools/list":
         # In read-only mode, only palace_query is exposed
         tools_list = []
         for name, tool_def in LIGHT_TOOLS.items():
@@ -781,7 +782,7 @@ def handle_light_request(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "id": req_id,
             "result": {"tools": tools_list},
         }
-    elif method == "tools/call":
+    if method == "tools/call":
         if not isinstance(params, dict) or "name" not in params:
             return {
                 "jsonrpc": "2.0",

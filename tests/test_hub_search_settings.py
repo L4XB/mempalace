@@ -75,6 +75,7 @@ _NOT_SEARCH_SETTINGS = {
 
 _SETTING_SOURCES = (
     "config.py",
+    "paths.py",
     "embedding.py",
     "backends/chroma.py",
     "backends/milvus.py",

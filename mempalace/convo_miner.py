@@ -14,7 +14,6 @@ import os
 import stat
 import sys
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -52,8 +51,9 @@ from .palace import (
     write_file_drawers,
 )
 from .source_identity import identity_metadata, source_directory_identity
+from .timeutil import utc_now_iso
 
-logger = logging.getLogger("mempalace_mcp")
+logger = logging.getLogger(__name__)
 
 # Cached hall keywords — avoids re-reading config per drawer
 _HALL_KEYWORDS_CACHE = None
@@ -127,7 +127,7 @@ def file_conversation_exchange(
             "file_conversation_exchange: invalid room %r — filing under conversations", room
         )
         room = "conversations"
-    filed_at = datetime.now().isoformat()
+    filed_at = utc_now_iso()
     drawer_id = make_exchange_drawer_id(wing, room, source_file, filed_at, text)
     metadata = {
         "wing": wing,
@@ -148,7 +148,7 @@ def file_conversation_exchange(
         "convo_chunker_version": CONVO_CHUNKER_VERSION,
         "id_recipe": ID_RECIPE,
         # Same directory identity a mined drawer carries, so ``sync`` decides
-        # a live exchange and a historical one by the same rule (#2320).
+        # a live exchange and a historical one by the same rule.
         **identity_metadata(source_file),
     }
     if extra_metadata:
@@ -239,7 +239,7 @@ def _register_file(
         "room": "_registry",
         "source_file": source_file,
         "added_by": agent,
-        "filed_at": datetime.now().isoformat(),
+        "filed_at": utc_now_iso(),
         "ingest_mode": "registry",
         "extract_mode": extract_mode,
         "normalize_version": NORMALIZE_VERSION,
@@ -296,8 +296,7 @@ def chunk_exchanges(
 
     if quote_lines >= 3:
         return _chunk_by_exchange(lines, chunk_size, min_chunk_size)
-    else:
-        return _chunk_by_paragraph(content, chunk_size, min_chunk_size)
+    return _chunk_by_paragraph(content, chunk_size, min_chunk_size)
 
 
 def _chunk_by_exchange(lines: list, chunk_size: int, min_chunk_size: int) -> list:
@@ -555,8 +554,8 @@ def scan_convos(convo_dir: str, include_subagents: bool = False) -> list:
                 # Skip files exceeding size limit, or those whose stat() raises
                 # (permission denied, racing delete, broken symlink that
                 # survived the earlier is_symlink check). Both branches log
-                # to stderr to match the SKIP: (symlink) line above; silent
-                # drops at this gate were the original #923 complaint.
+                # to stderr to match the SKIP: (symlink) line above, so no
+                # file is dropped here without a word.
                 try:
                     file_stat = filepath.stat()
                     # Drop non-regular entries (FIFO, socket, device node)
@@ -668,7 +667,7 @@ def _file_chunks_locked(
         # One filed_at per source file so all transcript drawers share an
         # ingest timestamp. Prefer the mtime captured with the read: a fresh
         # stat here can observe an append that this pass did not ingest.
-        filed_at = datetime.now().isoformat()
+        filed_at = utc_now_iso()
         if source_mtime is None:
             try:
                 source_mtime = os.path.getmtime(source_file)
@@ -707,7 +706,7 @@ def _file_chunks_locked(
             if source_dir_ino:
                 # Which directory this transcript was read from, so ``sync``
                 # can tell a neighbour in the same directory from one on a
-                # volume mounted there since (#2320).
+                # volume mounted there since.
                 meta["source_dir_ino"] = source_dir_ino
             drawer_id = make_convo_drawer_id(
                 wing, chunk_room, source_file, extract_mode, chunk["chunk_index"]
@@ -784,7 +783,7 @@ def _resolve_wing(convo_path: Path, wing: Optional[str]) -> str:
          (lowercase, spaces/hyphens collapsed to underscores). Shared
          single source of truth with ``cmd_init``,
          ``room_detector_local``, and ``miner.load_config`` so all
-         wing-slug producers stay in sync (per #1194 consolidation).
+         wing-slug producers stay in sync.
     """
     from .config import normalize_wing_name
 
@@ -1169,12 +1168,3 @@ def _mine_convos_impl(
     print(f"{'=' * 55}\n")
     # After the summary, so the operator still sees what was filed.
     raise_if_files_failed(files_failed, files_processed)
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python convo_miner.py <convo_dir> [--palace PATH] [--limit N] [--dry-run]")
-        sys.exit(1)
-    from .config import MempalaceConfig
-
-    mine_convos(sys.argv[1], palace_path=MempalaceConfig().palace_path)

@@ -192,7 +192,7 @@ def search(
     Search the palace. Returns verbatim drawer content.
     Optionally filter by wing (project) or room (aspect), and/or narrow to
     drawers whose ``filed_at`` falls in the ``[since, before)`` window —
-    same semantics as ``search_memories``/``list_drawers`` (#1128/#463).
+    same semantics as ``search_memories``/``list_drawers``.
     """
     if include_media or query_task != "search":
         result = search_memories(
@@ -228,7 +228,7 @@ def search(
                 print(hit["text"])
         if not result["results"]:
             print("No results found.")
-        return
+        return None
     # Resolved before the fence below: both exits from this function rank by
     # BM25, so the filter has to be in hand on either branch.
     stop_words = _resolve_stop_words(None)
@@ -281,7 +281,7 @@ def search(
     # creation — their similarity scores will be junk until they run repair.
     _warn_if_legacy_metric(col)
 
-    where = build_where_filter(wing, room)
+    where = build_where_filter(wing, room, col=col)
 
     metric = _metric_for_collection(col)
     fetch = _candidate_pool_size(n_results, date_window_active)
@@ -312,7 +312,7 @@ def search(
     hits = hits[:n_results]
     if not hits:
         print(f'\n  No results found for: "{query}"')
-        return
+        return None
 
     print(f"\n{'=' * 60}")
     print(f'  Results for: "{query}"')

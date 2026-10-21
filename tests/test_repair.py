@@ -1675,7 +1675,7 @@ def test_max_seq_id_detects_poison_rows(tmp_path):
         seg["closets_vec"],
         seg["closets_meta"],
     }
-    for sid, val in found:
+    for _sid, val in found:
         assert val > repair.MAX_SEQ_ID_SANITY_THRESHOLD
     assert "seg-clean" not in ids
 
@@ -3087,7 +3087,7 @@ def test_preview_legacy_repair_leaves_the_palace_byte_identical(tmp_path, capsys
     assert [p for p in tmp_path.iterdir() if p.name.endswith(".backup")] == []
     out = capsys.readouterr().out
     assert "holds 6 rows" in out
-    assert "#1208 truncation guard" in out
+    assert "(the truncation guard)" in out
 
 
 def test_cmd_repair_dry_run_leaves_a_real_palace_byte_identical(tmp_path, capsys):
@@ -3218,7 +3218,7 @@ def test_preview_legacy_repair_reports_the_truncation_guard_as_disabled(tmp_path
 
     out = capsys.readouterr().out
     assert counts == {"mempalace_drawers": 3}
-    assert "#1208 truncation guard is DISABLED" in out
+    assert "the truncation guard is DISABLED" in out
     assert "the difference would be destroyed" in out
     assert "abort without changes" not in out
 
@@ -3947,14 +3947,14 @@ def test_declined_heal_message_renders_as_one_log_record(tmp_path, caplog):
     ``_validate_palace_fts5_after_mine`` passes ``logger.warning`` as
     ``progress`` so the MCP process does not print into its JSON-RPC stream. A
     message that opens with a newline renders there as a bare
-    ``WARNING:mempalace_mcp:`` header above an empty line, which reads as a
+    ``WARNING:mempalace.mcp_server:`` header above an empty line, which reads as a
     truncated record rather than an explanation.
     """
     palace = _make_fts5_palace(tmp_path, corrupt=False)
     page_errors = ["Page 4 of B-tree 12345: database disk image is malformed"]
 
-    logger = logging.getLogger("mempalace_mcp")
-    with caplog.at_level(logging.WARNING, logger="mempalace_mcp"):
+    logger = logging.getLogger("mempalace.mcp_server")
+    with caplog.at_level(logging.WARNING, logger="mempalace"):
         repair.maybe_autoheal_fts5_index(palace, page_errors, progress=logger.warning)
 
     assert caplog.records, "the decline must be logged, not swallowed"

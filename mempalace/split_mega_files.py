@@ -29,6 +29,7 @@ import re
 import stat
 from pathlib import Path
 
+from mempalace import paths
 from mempalace.fsio import decode_source
 
 HOME = Path.home()
@@ -36,7 +37,7 @@ LUMI_DIR = Path(os.environ.get("MEMPALACE_SOURCE_DIR", str(HOME / "Desktop/trans
 
 # People we know about (for name detection in content)
 # Loaded from ~/.mempalace/known_names.json if it exists; no built-in fallback names.
-_KNOWN_NAMES_PATH = HOME / ".mempalace" / "known_names.json"
+_KNOWN_NAMES_PATH = paths.state_path("known_names.json")
 _KNOWN_NAMES_CACHE = None
 
 

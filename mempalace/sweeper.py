@@ -42,13 +42,13 @@ import json
 import logging
 import stat
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
 from .fsio import decode_source, encoding_metadata
 from .palace import get_collection
 from .source_identity import source_directory_identity
+from .timeutil import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -318,11 +318,11 @@ def sweep(jsonl_path: str, palace_path: str, source_label: Optional[str] = None)
             "message_uuid": rec["uuid"],
             "role": rec["role"],
             "source_file": source_label or jsonl_path,
-            "filed_at": datetime.now().isoformat(),
+            "filed_at": utc_now_iso(),
             "ingest_mode": "sweep",
         }
         # The directory this drawer's ``source_file`` sits in, so ``sync``
-        # decides a swept drawer by the same reading as a mined one (#2320).
+        # decides a swept drawer by the same reading as a mined one.
         if source_dir_ino:
             metadata["source_dir_ino"] = source_dir_ino
         metadata.update(encoding_metadata(rec["encoding"]))

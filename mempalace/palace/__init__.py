@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
+from .. import paths
 from ..backends import (
     BackendClosedError,
     BackendError,
@@ -44,7 +45,7 @@ from ..entity_detector import (
 )
 from ..metadata_types import coerce_metadata_types
 
-logger = logging.getLogger("mempalace_mcp")
+logger = logging.getLogger(__name__)
 
 SKIP_DIRS = {
     ".git",
@@ -57,7 +58,7 @@ SKIP_DIRS = {
     "build",
     ".next",
     "coverage",
-    ".mempalace",
+    paths.DIRNAME,
     ".ruff_cache",
     ".mypy_cache",
     ".pytest_cache",

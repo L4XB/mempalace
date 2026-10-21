@@ -101,7 +101,7 @@ def test_chroma_empty_palace_records_identity_without_count(tmp_path, monkeypatc
 
 
 def test_sqlite_collection_has_rows(tmp_path):
-    from mempalace.backends.chroma import _sqlite_collection_has_rows
+    from mempalace.backends.chroma_sqlite import _sqlite_collection_has_rows
 
     assert _sqlite_collection_has_rows(str(tmp_path / "missing"), "mempalace_drawers") is None
     col = _chroma_collection(tmp_path)

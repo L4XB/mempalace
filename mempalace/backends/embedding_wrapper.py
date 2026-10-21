@@ -6,7 +6,12 @@ import inspect
 from pathlib import PurePath
 from typing import Optional
 
-from .base import BaseCollection, GetResult, initialize_last_modified_metadata
+from .base import (
+    BaseCollection,
+    GetResult,
+    initialize_last_modified_metadata,
+    validate_write_batch,
+)
 
 
 def _supports_metadata_aware_documents(embedder) -> bool:
@@ -104,7 +109,6 @@ def _as_list(value):
     ``list({"k": 1})`` yields ``['k']`` — either desyncs embeddings/metadatas
     from ``ids`` on explicit-vector backends (pgvector, sqlite_exact). A list is
     returned unchanged (no copy); any other iterable is materialized once.
-    See PR #1706/#1707 review.
     """
     if isinstance(value, (str, dict)):
         return [value]
@@ -200,10 +204,7 @@ class EmbeddingCollection(BaseCollection):
         ids = _as_list(ids)
         if metadatas is not None:
             metadatas = initialize_last_modified_metadata(_as_list(metadatas))
-        if metadatas is not None and len(metadatas) != len(ids):
-            raise ValueError("metadatas length does not match ids length")
-        if len(documents) != len(ids):
-            raise ValueError("documents length does not match ids length")
+        validate_write_batch(ids, documents=documents, metadatas=metadatas)
         expected = None
         if embeddings is None:
             embedder = _resolve_document_embedder()
@@ -328,7 +329,7 @@ class EmbeddingCollection(BaseCollection):
         # base default — which routes back through ``self.get()`` (the
         # wrapper's get, then ``__getattr__`` to the inner's get). Result:
         # the inner's overridden ``get_all_metadata`` (e.g. pgvector's
-        # ``with_document=False`` fast path from #1892) is never reached,
+        # ``with_document=False`` fast path) is never reached,
         # and every metadata-only fetch transfers the full document column
         # over the wire. Same MRO-shadow pattern as ``facet_counts`` /
         # ``lexical_search`` above.
@@ -349,15 +350,7 @@ class EmbeddingCollection(BaseCollection):
             metadatas = _as_list(metadatas)
         if documents is not None:
             documents = _as_list(documents)
-        for label, value in (
-            ("documents", documents),
-            ("metadatas", metadatas),
-            ("embeddings", embeddings),
-        ):
-            if value is not None and len(value) != len(ids):
-                raise ValueError(
-                    f"{label} length {len(value)} does not match ids length {len(ids)}"
-                )
+        validate_write_batch(ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
         expected = None
         if documents is not None and embeddings is None:
             embedder = _resolve_document_embedder()
