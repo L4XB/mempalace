@@ -312,7 +312,7 @@ def remove_abandoned_publish_temps(
 
     ``atomic_publish`` removes its temporary file when the write or the rename
     fails, but a writer killed in between (SIGKILL, the OOM killer) leaves it,
-    and no later publish reuses the name: each runs under its own pid. This
+    and no later publish reuses the name: each picks a fresh random one. This
     removes regular files next to ``path`` that carry a name ``atomic_publish``
     gives its temporaries, or one ``legacy`` matches, once nothing has
     modified them for ``older_than`` seconds: a writer still filling one

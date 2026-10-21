@@ -160,8 +160,8 @@ def test_crash_before_replace_does_not_truncate(tmp_path, monkeypatch):
 
 def test_a_publish_killed_before_the_rename_leaves_a_temp_file_the_sweep_removes(tmp_path):
     """A writer killed between filling its temporary file and the rename runs no
-    cleanup, so the file stays, and no later publish reuses the pid-named name
-    (#2756). Once nothing has modified it for ``older_than`` seconds the sweep
+    cleanup, so the file stays, and no later publish reuses its randomly chosen
+    name (#2756). Once nothing has modified it for ``older_than`` seconds the sweep
     removes it; before that it may be a live writer's, so it stays."""
     dest = tmp_path / "state.json"
     dest.write_text('{"old": 1}', encoding="utf-8")
@@ -174,7 +174,7 @@ def test_a_publish_killed_before_the_rename_leaves_a_temp_file_the_sweep_removes
     child = subprocess.run([sys.executable, "-c", killed_mid_publish, str(dest)])
     assert child.returncode == 9
     (leftover,) = [p for p in tmp_path.iterdir() if p.name != "state.json"]
-    assert leftover.name.startswith("state.json.tmp-")
+    assert leftover.name.startswith(".state.json.") and leftover.name.endswith(".tmp")
 
     assert fsio.remove_abandoned_publish_temps(dest, older_than=600) == 0
     assert leftover.exists()
