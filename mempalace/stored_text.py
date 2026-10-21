@@ -77,8 +77,8 @@ def _encode(value, changed: list):
             return value
         changed.append(True)
         return _PREFIX + _ESCAPE.sub(_escape_char, value)
-    if isinstance(value, list):
-        return [_encode(item, changed) for item in value]
+    if isinstance(value, (list, tuple)):
+        return type(value)(_encode(item, changed) for item in value)
     return value
 
 

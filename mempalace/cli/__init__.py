@@ -49,6 +49,7 @@ import sys
 import warnings
 from pathlib import Path
 
+from .. import paths
 from ..cli_write_routing import (
     add_cli_write_routing_flags,
     resolve_cli_write_routing,

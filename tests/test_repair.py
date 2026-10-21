@@ -3947,14 +3947,14 @@ def test_declined_heal_message_renders_as_one_log_record(tmp_path, caplog):
     ``_validate_palace_fts5_after_mine`` passes ``logger.warning`` as
     ``progress`` so the MCP process does not print into its JSON-RPC stream. A
     message that opens with a newline renders there as a bare
-    ``WARNING:mempalace_mcp:`` header above an empty line, which reads as a
+    ``WARNING:mempalace.mcp_server:`` header above an empty line, which reads as a
     truncated record rather than an explanation.
     """
     palace = _make_fts5_palace(tmp_path, corrupt=False)
     page_errors = ["Page 4 of B-tree 12345: database disk image is malformed"]
 
-    logger = logging.getLogger("mempalace_mcp")
-    with caplog.at_level(logging.WARNING, logger="mempalace_mcp"):
+    logger = logging.getLogger("mempalace.mcp_server")
+    with caplog.at_level(logging.WARNING, logger="mempalace"):
         repair.maybe_autoheal_fts5_index(palace, page_errors, progress=logger.warning)
 
     assert caplog.records, "the decline must be logged, not swallowed"

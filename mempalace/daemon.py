@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import math
 import os
 import secrets
 import sqlite3
@@ -20,15 +19,18 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib import error as urlerror, request as urlrequest
 from urllib.parse import parse_qs, urlparse
 
+from . import paths
+from ._env import env_float, env_int
 from ._proc import kernel32 as _kernel32, pid_alive as _pid_alive
 from .config import MempalaceConfig
+from .fsio import atomic_write_text, read_published_bytes
 from .palace import (
     MineAlreadyRunning,
     backend_requires_single_writer,
@@ -36,6 +38,7 @@ from .palace import (
     resolve_backend_name,
 )
 from .stored_text import dumps_internal
+from .timeutil import utc_now, utc_now_iso
 
 HOST = "127.0.0.1"
 STATE_ROOT_ENV = "MEMPALACE_DAEMON_STATE_ROOT"
@@ -65,16 +68,8 @@ def _lock_defer_backoff_seconds() -> float:
     instantly and spin the worker against a lock it cannot take; and ``inf``
     would park the job until the daemon restarts, silently dropping its work.
     """
-    try:
-        value = float(
-            os.environ.get("MEMPALACE_DAEMON_LOCK_BACKOFF_SECONDS", "")
-            or _DEFAULT_LOCK_BACKOFF_SECONDS
-        )
-    except ValueError:
-        return _DEFAULT_LOCK_BACKOFF_SECONDS
-    if not math.isfinite(value) or value <= 0:
-        return _DEFAULT_LOCK_BACKOFF_SECONDS
-    return value
+    value = env_float("MEMPALACE_DAEMON_LOCK_BACKOFF_SECONDS", _DEFAULT_LOCK_BACKOFF_SECONDS)
+    return value if value > 0 else _DEFAULT_LOCK_BACKOFF_SECONDS
 
 
 # Override via env for operators; tests patch the module attribute directly.
@@ -84,7 +79,7 @@ SHUTDOWN_DRAIN_SECONDS = 10.0
 # Terminal jobs are kept for diagnostics then pruned so the queue DB (which
 # holds verbatim payloads) doesn't grow without bound across a long-lived
 # daemon. Override via env for operators who want a longer/shorter window.
-JOB_RETENTION_DAYS = int(os.environ.get("MEMPALACE_DAEMON_RETENTION_DAYS", "7") or "7")
+JOB_RETENTION_DAYS = env_int("MEMPALACE_DAEMON_RETENTION_DAYS", 7)
 try:
     import fcntl as _fcntl  # POSIX only; absent on Windows
 except ImportError:  # pragma: no cover - Windows fallback
@@ -110,26 +105,22 @@ class DaemonError(RuntimeError):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now_iso()
 
 
 def canonical_palace_path(path: str | None = None) -> str:
-    value = path or MempalaceConfig().palace_path
-    return os.path.abspath(os.path.realpath(os.path.expanduser(value)))
+    return paths.canonical_palace_path(path or MempalaceConfig().palace_path)
 
 
 def palace_key(palace_path: str) -> str:
-    import hashlib
-
-    normalized = os.path.normcase(canonical_palace_path(palace_path))
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return paths.palace_key(canonical_palace_path(palace_path))
 
 
 def state_root() -> Path:
     raw = os.environ.get(STATE_ROOT_ENV)
     if raw:
         return Path(raw).expanduser()
-    return Path.home() / ".mempalace" / "daemon"
+    return paths.state_path("daemon")
 
 
 def state_dir(palace_path: str) -> Path:
@@ -138,9 +129,7 @@ def state_dir(palace_path: str) -> Path:
 
 def _write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    atomic_write_text(path, text)
 
 
 def ensure_token(palace_path: str) -> str:
@@ -157,7 +146,7 @@ def ensure_token(palace_path: str) -> str:
 def read_token(palace_path: str) -> str:
     token_path = state_dir(palace_path) / "token"
     try:
-        return token_path.read_text(encoding="utf-8").strip()
+        return read_published_bytes(token_path).decode("utf-8").strip()
     except OSError as exc:
         raise DaemonError(f"daemon token not found for {palace_path}") from exc
 
@@ -176,9 +165,8 @@ def queue_path(palace_path: str) -> Path:
 
 def _read_endpoint(palace_path: str) -> dict[str, Any]:
     try:
-        with open(endpoint_path(palace_path), encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, json.JSONDecodeError) as exc:
+        return json.loads(read_published_bytes(endpoint_path(palace_path)).decode("utf-8"))
+    except (OSError, ValueError) as exc:
         raise DaemonError("daemon endpoint not found") from exc
 
 
@@ -279,7 +267,7 @@ class QueueStore:
         """
         if older_than_days <= 0:
             return 0
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+        cutoff = (utc_now() - timedelta(days=older_than_days)).isoformat(timespec="microseconds")
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 """

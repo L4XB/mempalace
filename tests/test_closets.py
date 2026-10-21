@@ -33,6 +33,7 @@ import time
 import pytest
 import yaml
 
+from mempalace.lexical import bm25_scores
 from mempalace.miner import (
     _extract_entities_for_metadata,
     _load_known_entities,
@@ -54,7 +55,6 @@ from mempalace.palace_graph import (
     list_tunnels,
 )
 from mempalace.searcher import (
-    _bm25_scores,
     _enrich_closet_hits,
     _hybrid_rank,
     search_memories,
@@ -678,7 +678,7 @@ class TestEntityMetadata:
 
 class TestBM25:
     def test_scores_positive_for_matching_doc(self):
-        scores = _bm25_scores(
+        scores = bm25_scores(
             "database migration",
             ["We migrated the database to Postgres.", "unrelated cookery tips"],
         )
@@ -686,13 +686,13 @@ class TestBM25:
         assert scores[1] == 0.0
 
     def test_scores_zero_when_no_overlap(self):
-        scores = _bm25_scores("quantum physics", ["We built a web app in React"])
+        scores = bm25_scores("quantum physics", ["We built a web app in React"])
         assert scores == [0.0]
 
     def test_idf_downweights_terms_present_in_every_doc(self):
         # "database" appears in every candidate → low IDF → low contribution.
         # "vacuum" is unique to one → high IDF → that doc dominates.
-        scores = _bm25_scores(
+        scores = bm25_scores(
             "database vacuum",
             [
                 "database backup nightly schedule",
@@ -703,9 +703,9 @@ class TestBM25:
         assert scores[1] == max(scores), "doc with the rare query term should win on IDF"
 
     def test_empty_inputs_return_zeros(self):
-        assert _bm25_scores("", ["hello world"]) == [0.0]
-        assert _bm25_scores("query here", []) == []
-        assert _bm25_scores("query", [""]) == [0.0]
+        assert bm25_scores("", ["hello world"]) == [0.0]
+        assert bm25_scores("query here", []) == []
+        assert bm25_scores("query", [""]) == [0.0]
 
     def test_hybrid_rank_promotes_keyword_match(self):
         results = [

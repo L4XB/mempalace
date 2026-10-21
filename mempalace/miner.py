@@ -7,7 +7,6 @@ Routes each file to the right room based on content.
 Stores verbatim chunks as drawers. No summaries. Ever.
 """
 
-import errno
 import fnmatch
 import hashlib
 import logging
@@ -16,14 +15,15 @@ import re
 import shlex
 import stat
 import sys
-import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from . import paths
+from ._env import env_str, parse_number
 from .entity_detector import _apply_known_systems_prepass, _get_coca_filter
-from .fsio import encoding_metadata, read_source_text
+from .fsio import atomic_write_json, encoding_metadata, move_aside, read_source_text
 
 # Module-level import so tests can patch it as
 # ``mempalace.miner.compute_hallways_for_wing``. The integration call
@@ -64,8 +64,9 @@ from .project_config import (  # noqa: F401
     find_project_config,
 )
 from .source_identity import source_directory_identity
+from .timeutil import utc_now_iso
 
-logger = logging.getLogger("mempalace_mcp")
+logger = logging.getLogger(__name__)
 
 
 def _path_within_root(path: Path, root: Path) -> bool:
@@ -229,22 +230,14 @@ def _resolve_max_chunks_per_file(override: Optional[int] = None) -> int:
             )
             return MAX_CHUNKS_PER_FILE
         return int(override)
-    raw = os.environ.get("MEMPALACE_MAX_CHUNKS_PER_FILE")
+    raw = env_str("MEMPALACE_MAX_CHUNKS_PER_FILE")
     if raw is None:
         return MAX_CHUNKS_PER_FILE
-    try:
-        val = int(raw)
-    except ValueError:
+    val = parse_number(raw, int)
+    if val is None or val < 0:
         print(
-            f"  ! WARNING: MEMPALACE_MAX_CHUNKS_PER_FILE={raw!r} is not an integer; "
-            f"using default {MAX_CHUNKS_PER_FILE}",
-            file=sys.stderr,
-        )
-        return MAX_CHUNKS_PER_FILE
-    if val < 0:
-        print(
-            f"  ! WARNING: MEMPALACE_MAX_CHUNKS_PER_FILE={val} is negative; "
-            f"using default {MAX_CHUNKS_PER_FILE}",
+            f"  ! WARNING: MEMPALACE_MAX_CHUNKS_PER_FILE={raw!r} is not a non-negative "
+            f"integer; using default {MAX_CHUNKS_PER_FILE}",
             file=sys.stderr,
         )
         return MAX_CHUNKS_PER_FILE
@@ -755,7 +748,7 @@ def chunk_text(
 # =============================================================================
 
 
-_ENTITY_REGISTRY_PATH = os.path.join(os.path.expanduser("~"), ".mempalace", "known_entities.json")
+_ENTITY_REGISTRY_PATH = str(paths.state_path("known_entities.json"))
 _ENTITY_REGISTRY_CACHE: dict = {"mtime": None, "names": frozenset(), "raw": {}}
 _ENTITY_EXTRACT_WINDOW = 5000  # chars of content scanned for capitalized words
 _ENTITY_METADATA_LIMIT = 25  # max entities packed into the metadata field
@@ -865,269 +858,6 @@ def _set_wing_topics(existing: dict, wing_key: str, topics_for_wing: list, coerc
         existing.pop("topics_by_wing", None)
 
 
-def _registry_write_target(registry_path):
-    """The file a registry write should replace, following a symlink to it.
-
-    A registry kept in a dotfiles checkout is reached through a link, and
-    ``write_text`` wrote through it. Replacing the link itself would leave the
-    real file holding what it held and send this merge, and every later one,
-    somewhere the user is not looking, so the temporary file and the rename
-    both happen at the target instead. ``realpath`` follows the whole chain
-    rather than one link, which is the file the reader would have got.
-
-    A link this call cannot ``lstat`` is not reported as "not a link": that
-    reading would send the write through ``os.replace`` and put a regular file
-    where the link was. The error is raised instead, since the caller has to
-    write somewhere and there is no safe guess about where.
-    """
-    try:
-        is_link = stat.S_ISLNK(os.lstat(str(registry_path)).st_mode)
-    except FileNotFoundError:
-        return registry_path
-    if is_link:
-        return Path(os.path.realpath(str(registry_path)))
-    return registry_path
-
-
-# ``mkstemp`` is not usable where a permission error has to reach the caller.
-# On Windows it treats ``PermissionError`` as a name collision and tries the
-# next candidate, up to ``tempfile.TMP_MAX`` of them. That constant is 20 on
-# Python 3.13 and later, and ``os.TMP_MAX`` -- 2_147_483_647 -- on 3.12 and
-# earlier, where the sweep runs for hours at roughly 21_000 names a second and
-# reads as a hang. Both callers below need the error instead: it is how they
-# learn the directory takes no new names.
-_TEMP_NAME_ATTEMPTS = 8
-
-
-def _open_new_temp_file(directory, prefix: str, suffix: str = ""):
-    """Create one new file under ``directory`` and return ``(fd, path)``.
-
-    Only a name already taken is retried, and only ``_TEMP_NAME_ATTEMPTS``
-    times. Every other ``OSError`` -- ``EPERM``, ``EACCES``, ``EROFS`` among
-    them -- is raised for the caller to act on, which is what ``mkstemp``
-    cannot be relied on to do. Exhausting the attempts raises
-    ``FileExistsError``, as ``mkstemp`` does.
-    """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    names = tempfile._get_candidate_names()
-    for _ in range(_TEMP_NAME_ATTEMPTS):
-        candidate = os.path.join(str(directory), f"{prefix}{next(names)}{suffix}")
-        try:
-            return os.open(candidate, flags, 0o600), candidate
-        except FileExistsError:
-            continue
-    raise FileExistsError(
-        errno.EEXIST,
-        f"no usable temporary file name found in {directory} after {_TEMP_NAME_ATTEMPTS} attempts",
-    )
-
-
-def _keep_unmergeable_registry(registry_path) -> Optional[str]:
-    """Move a registry this call could not merge aside, keeping its bytes.
-
-    Renaming needs the directory rather than the file, so a registry whose
-    contents did not parse is preserved whole, and the caller is left with a
-    free name to write. ``FileNotFoundError`` from the rename is the one
-    outcome that establishes there was nothing to keep; every other failure
-    leaves the file where it is and is raised, because a registry that could
-    not be moved is not one to write over. A directory that will not take a
-    new name raises here for the same reason.
-
-    Returns the path the old registry now lives at, or ``None`` when there
-    was no file there.
-    """
-
-    registry_path = _registry_write_target(registry_path)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    fd, target = _open_new_temp_file(
-        registry_path.parent,
-        prefix=f"{registry_path.name}.unreadable-{stamp}-",
-    )
-    os.close(fd)
-    try:
-        os.replace(str(registry_path), target)
-    except FileNotFoundError:
-        _unlink_quietly(target)
-        return None
-    except OSError:
-        _unlink_quietly(target)
-        raise
-    return target
-
-
-def _unlink_quietly(path: str) -> None:
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
-
-def _fsync_directory(directory) -> None:
-    """Make the rename itself durable.
-
-    ``EntityRegistry.save`` spells out why: on ext4 the kernel can acknowledge
-    a rename and, after a crash, come back to the temporary file present and
-    the target still holding the old bytes. Windows cannot open a directory
-    this way at all, and answering nothing there is the same as answering
-    nothing on a filesystem that does not implement it.
-    """
-    try:
-        fd = os.open(str(directory), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
-
-
-def _write_registry_in_place(registry_path, payload: dict) -> None:
-    """Write the registry without the rename, for a directory that refuses one.
-
-    This is ``develop``'s write. It is kept for the one case where the atomic
-    write cannot run at all, since a merge that is lost outright is worse than
-    a merge that is not crash-safe.
-    """
-    import json as _json
-
-    with open(registry_path, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    try:
-        os.chmod(registry_path, 0o600)
-    except (OSError, NotImplementedError):
-        pass
-
-
-def _publish_registry(registry_path, payload: dict) -> None:
-    """Write ``payload`` to ``registry_path`` through a temporary file.
-
-    The rename is what publishes it, so an interrupted write cannot leave the
-    registry empty or half-serialized, which is where the unreadable files
-    this module now preserves came from. ``EntityRegistry.save`` writes its own
-    registry this way, down to the directory ``fsync`` that makes the rename
-    survive a crash; ``migrate._apply_topics_by_wing_renames`` writes this same
-    file through a temporary file and a rename as well.
-
-    The temporary file carries this process's pid rather than a random suffix,
-    so two concurrent ``mempalace init`` runs never share one. A run killed
-    between the write and the rename leaves that file behind, and nothing here
-    removes it. ``O_NOFOLLOW`` keeps a symlink dropped at that name from being
-    written through, and anything else in the way of that name sends the write
-    to a name the directory picks rather than to a write without the rename.
-
-    A directory that will not take a name it chose itself is the one case that
-    falls back to writing in place: a read-only ``~/.mempalace`` whose registry
-    is still writable is what reaches it, and ``develop`` merged into it
-    without complaint.
-    """
-    import json as _json
-
-    registry_path = _registry_write_target(registry_path)
-    tmp = str(registry_path.with_name(f"{registry_path.name}.tmp-{os.getpid()}"))
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(tmp, flags, 0o600)
-        if os.fstat(fd).st_nlink > 1:
-            # A hard link at that name is not a symlink, so ``O_NOFOLLOW`` lets
-            # it through, and truncating through it would empty a file nobody
-            # named here. The truncate happens below, after this has ruled that
-            # out, and the write goes to a name the directory chose instead.
-            os.close(fd)
-            raise OSError(errno.EMLINK, "temporary name has another link", tmp)
-    except OSError:
-        # This errno belongs to the name, not to the directory. An orphan
-        # another user's run left at that name, a directory dropped there, and
-        # a symlink planted there all answer the way a directory that takes no
-        # new names answers, and giving up the rename on that reading is how
-        # the atomic write turns itself off where it was needed. Ask the
-        # directory for a name of its own instead: what it says about a name
-        # it chooses is about the directory.
-        try:
-            fd, tmp = _open_new_temp_file(
-                registry_path.parent,
-                prefix=f".{registry_path.name}.",
-                suffix=".tmp",
-            )
-        except OSError as exc:
-            if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
-                raise
-            _write_registry_in_place(registry_path, payload)
-            print(
-                f"  ! {registry_path.parent} would not take a temporary file, so "
-                f"{registry_path.name} was written in place and an interrupted write "
-                "can truncate it",
-                file=sys.stderr,
-            )
-            return
-    try:
-        # The mode is set before anything is written rather than after: under a
-        # umask that clears the owner's write bit, ``O_CREAT`` leaves the file
-        # at 0400, and one left behind by a killed run is then a name its own
-        # owner cannot open next time.
-        try:
-            os.chmod(tmp, 0o600)
-        except (OSError, NotImplementedError):
-            pass
-        os.ftruncate(fd, 0)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            _json.dump(payload, f, indent=2, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-    except BaseException:
-        _unlink_quietly(tmp)
-        raise
-    try:
-        os.replace(tmp, str(registry_path))
-    except BaseException as exc:
-        if not isinstance(exc, OSError):
-            # A signal between the write and the rename leaves the temporary
-            # file behind for no reason: nothing has been published yet.
-            _unlink_quietly(tmp)
-            raise
-        # Opening a temporary file that already exists needs the file, not the
-        # directory, so a run that reused an orphan at the pid name never asked
-        # the directory anything. The rename is where the directory answers,
-        # and a read-only one answers here rather than above.
-        if exc.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
-            _unlink_quietly(tmp)
-            raise
-        # The temporary file holds this merge, complete and fsynced. Removing
-        # it before writing in place would trade a finished copy for a write
-        # that truncates first, so it is removed after that write returns, and
-        # named if it could not be.
-        try:
-            _write_registry_in_place(registry_path, payload)
-        except BaseException:
-            # That write truncates before it serializes, so what was there is
-            # gone whether or not this one finished.
-            print(
-                f"  ! {registry_path.name} was not written and may have been "
-                f"truncated; {tmp} holds what this call was asked to save",
-                file=sys.stderr,
-            )
-            raise
-        _unlink_quietly(tmp)
-        if os.path.exists(tmp):
-            # Removing it needs the directory too, which is what just refused.
-            print(
-                f"  ! {tmp} holds a copy of what was written and could not be "
-                "removed; nothing here removes it later either",
-                file=sys.stderr,
-            )
-        print(
-            f"  ! {registry_path.parent} would not take the rename, so "
-            f"{registry_path.name} was written in place and an interrupted write "
-            "can truncate it",
-            file=sys.stderr,
-        )
-        return
-    _fsync_directory(registry_path.parent)
-
-
 def _registry_to_merge_into(registry_path) -> Optional[dict]:
     """The registry to merge into, or ``None`` when nothing may be written.
 
@@ -1175,7 +905,7 @@ def _registry_to_merge_into(registry_path) -> Optional[dict]:
     if isinstance(loaded, dict):
         return loaded
     try:
-        kept_at = _keep_unmergeable_registry(registry_path)
+        kept_at = move_aside(registry_path, label="unreadable")
     except OSError as exc:
         print(
             f"  ! Not writing {registry_path}: it does not parse and could not be "
@@ -1288,7 +1018,7 @@ def add_to_known_entities(entities_by_category: dict, wing: str = None) -> Optio
     if topics_for_wing is not None:
         _set_wing_topics(existing, wing.strip(), topics_for_wing, _coerce_name)
 
-    _publish_registry(registry_path, existing)
+    atomic_write_json(registry_path, existing)
 
     # Invalidate in-process cache so later calls in the same run see the write.
     _ENTITY_REGISTRY_CACHE["mtime"] = None
@@ -1757,7 +1487,7 @@ def _build_drawer_metadata(
         "source_file": source_file,
         "chunk_index": chunk_index,
         "added_by": agent,
-        "filed_at": datetime.now().isoformat(),
+        "filed_at": utc_now_iso(),
         "normalize_version": NORMALIZE_VERSION,
         "id_recipe": ID_RECIPE,
     }
@@ -2012,7 +1742,7 @@ def process_file(
                 "room": room,
                 "source_file": source_file,
                 "drawer_count": int(drawers_added),
-                "filed_at": datetime.now().isoformat(),
+                "filed_at": utc_now_iso(),
                 "normalize_version": NORMALIZE_VERSION,
             }
             if entities:
@@ -2596,7 +2326,8 @@ def status(palace_path: str):
     un-bootstrapped collection, or an unexpected schema); the fallback also
     emits the state-specific guidance for absent/empty palaces.
     """
-    from .backends.chroma import _sqlite_wing_room_counts, hnsw_capacity_status
+    from .backends.chroma import hnsw_capacity_status
+    from .backends.chroma_sqlite import _sqlite_wing_room_counts
 
     counts = _sqlite_wing_room_counts(palace_path, "mempalace_drawers")
     if counts is not None:

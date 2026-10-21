@@ -166,7 +166,7 @@ def _sqlite_logical_drawer_record(drawer_id: str):
     if not isinstance(drawer_id, str) or not drawer_id or not _is_chroma_backend():
         return None
     try:
-        from ..backends.chroma import sqlite_drawer_rows
+        from ..backends.chroma_sqlite import sqlite_drawer_rows
 
         result = sqlite_drawer_rows(
             _config.palace_path, _config.collection_name, drawer_id=drawer_id
@@ -383,7 +383,7 @@ def _fill_drawer_previews_from_sqlite(page: list, *, connection=None) -> bool:
     physical_ids = _page_physical_ids(page)
     if not physical_ids:
         return True
-    from ..backends.chroma import sqlite_documents_for_ids
+    from ..backends.chroma_sqlite import sqlite_documents_for_ids
 
     docs_by_id = sqlite_documents_for_ids(
         _config.palace_path, _config.collection_name, physical_ids, _connection=connection
@@ -535,7 +535,7 @@ def tool_add_drawer(
         "room": room,
         "source_file": source_file or "",
         "added_by": added_by,
-        "filed_at": datetime.now().isoformat(),
+        "filed_at": utc_now_iso(),
         "id_recipe": ID_RECIPE,
     }
     if source_file:
@@ -1352,7 +1352,8 @@ def tool_list_drawers(
         return {"error": str(e)}
 
     try:
-        where = build_where_filter(wing, room) or None
+        known = _palace_known_wings() if wing else frozenset()
+        where = build_where_filter(wing, room, known=known) or None
 
         def make_page(ids, metadatas):
             kept = [(i, m) for i, m in zip(ids, metadatas) if not is_bookkeeping(m, i)]
@@ -1375,7 +1376,7 @@ def tool_list_drawers(
             }
 
         if _is_chroma_backend() and _config.palace_path:
-            from ..backends.chroma import sqlite_list_id_metadata, sqlite_metadata_snapshot
+            from ..backends.chroma_sqlite import sqlite_list_id_metadata, sqlite_metadata_snapshot
 
             # Metadata selection, logical grouping and page-only text hydration
             # share a recovered SQLite snapshot. Close it before any SDK fallback.
@@ -1467,7 +1468,7 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             if room != str(old_meta.get("room") or ""):
                 new_meta["room"] = room
 
-        new_meta["last_modified"] = datetime.now().isoformat()
+        new_meta["last_modified"] = utc_now_iso()
 
         chunk_size = max(1, int(getattr(_config, "chunk_size", 800) or 800))
         should_chunk = bool(record.get("chunked")) or len(new_doc) > chunk_size

@@ -30,7 +30,8 @@ def _collection_has_rows(collection, palace_path, collection_name) -> Optional[b
     wake-up that reads ten drawers. Other backends, and a Chroma database the
     read cannot reach, fall back to ``count()``.
     """
-    from ..backends.chroma import ChromaCollection, _sqlite_collection_has_rows
+    from ..backends.chroma import ChromaCollection
+    from ..backends.chroma_sqlite import _sqlite_collection_has_rows
 
     inner = collection._inner if isinstance(collection, EmbeddingCollection) else collection
     if isinstance(inner, ChromaCollection):

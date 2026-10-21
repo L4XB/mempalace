@@ -64,6 +64,7 @@ import re
 import threading
 from typing import Optional
 
+from ._once import first_time
 from .version import __version__
 
 logger = logging.getLogger(__name__)
@@ -172,7 +173,6 @@ _EF_CACHE: dict = {}
 # resolving the same key each keep their own EF instance, and each instance
 # later lazy-loads its own copy of the model.
 _EF_CACHE_LOCK = threading.Lock()
-_WARNED: set = set()
 
 
 def _resolve_providers(device: str, model: Optional[str] = None) -> tuple[list, str]:
@@ -198,9 +198,7 @@ def _resolve_providers(device: str, model: Optional[str] = None) -> tuple[list, 
     if device in _TORCH_ONLY_DEVICES:
         # One embedding_device serves both runtimes; a value meant for
         # EmbeddingGemma 2's PyTorch path picks the best ONNX provider instead.
-        warn_key = ("onnx-torch-only-device", device)
-        if warn_key not in _WARNED:
-            _WARNED.add(warn_key)
+        if first_time("embedding", "onnx-torch-only-device", device):
             logger.warning(
                 "embedding_device=%r is a PyTorch device used by embeddinggemma2 only; "
                 "the ONNX model %r uses 'auto' instead.",
@@ -217,9 +215,8 @@ def _resolve_providers(device: str, model: Optional[str] = None) -> tuple[list, 
 
     requested = _PROVIDER_MAP.get(device)
     if requested is None:
-        if device not in _WARNED:
+        if first_time("embedding", "device", device):
             logger.warning("Unknown embedding_device %r -- falling back to cpu", device)
-            _WARNED.add(device)
         return (["CPUExecutionProvider"], "cpu")
 
     preferred = requested[0]
@@ -227,7 +224,7 @@ def _resolve_providers(device: str, model: Optional[str] = None) -> tuple[list, 
         return (requested, "cpu")
 
     if preferred not in available:
-        if device not in _WARNED:
+        if first_time("embedding", "device", device):
             extra = _DEVICE_EXTRA.get(device, "the matching mempalace extra for your device")
             logger.warning(
                 "embedding_device=%r requested but %s is not installed — "
@@ -236,7 +233,6 @@ def _resolve_providers(device: str, model: Optional[str] = None) -> tuple[list, 
                 preferred,
                 extra,
             )
-            _WARNED.add(device)
         return (["CPUExecutionProvider"], "cpu")
 
     return (requested, device)
@@ -486,13 +482,9 @@ def _sanitize_embeddinggemma_input_ids(tokenizer, input_ids, np):
         )
 
     invalid_ids = sorted({int(token_id) for token_id in input_ids[out_of_range]})
-    warning_key = (
-        "embeddinggemma-out-of-range-token-ids",
-        model_vocab_size,
-        tuple(invalid_ids),
-    )
-
-    if warning_key not in _WARNED:
+    if first_time(
+        "embedding", "embeddinggemma-out-of-range-token-ids", model_vocab_size, tuple(invalid_ids)
+    ):
         logger.warning(
             "EmbeddingGemma tokenizer produced token IDs outside the ONNX "
             "text vocabulary (size=%d): %s; remapping to <unk> (%d)",
@@ -500,7 +492,6 @@ def _sanitize_embeddinggemma_input_ids(tokenizer, input_ids, np):
             invalid_ids,
             unknown_token_id,
         )
-        _WARNED.add(warning_key)
 
     sanitized = input_ids.copy()
     sanitized[out_of_range] = unknown_token_id
@@ -773,21 +764,16 @@ _EF_API_BATCH = 64
 _EF_API_TIMEOUT = 120
 
 
-_external_embedding_warned = False
-
-
 def _warn_if_external_embedding(url: str) -> None:
     """Warn once when an embedding URL would send document text off-machine."""
-    global _external_embedding_warned
-    from mempalace.llm_client import endpoint_is_local
+    from mempalace.llm_client import endpoint_is_local, redact_secrets
 
-    if not url or endpoint_is_local(url) or _external_embedding_warned:
+    if not url or endpoint_is_local(url) or not first_time("embedding", "external-endpoint"):
         return
-    _external_embedding_warned = True
     logger.warning(
         "Embedding endpoint %s is outside the local network. "
         "Document text sent there leaves this machine.",
-        url,
+        redact_secrets(url),
     )
 
 
@@ -796,8 +782,14 @@ class EmbeddingAPIError(RuntimeError):
 
     Module-specific subclass mirroring ``llm_client.LLMError`` so callers can
     distinguish embedding-endpoint failures; subclasses ``RuntimeError`` so
-    existing ``except RuntimeError`` paths still catch it.
+    existing ``except RuntimeError`` paths still catch it. Like ``LLMError``,
+    its message is masked: the endpoint URL or its reply may carry a key.
     """
+
+    def __init__(self, message: str):
+        from mempalace.llm_client import redact_secrets
+
+        super().__init__(redact_secrets(message))
 
 
 class OpenAICompatEmbeddingFunction:
@@ -842,17 +834,11 @@ class OpenAICompatEmbeddingFunction:
         return self(input)
 
     def __call__(self, input):  # noqa: A002 — ChromaDB EF protocol uses `input`
-        import http.client
-        import json
-        from urllib.error import HTTPError, URLError
-        from urllib.request import Request, urlopen
+        from mempalace.llm_client import LLMError, post_json
 
-        headers = {
-            "Content-Type": "application/json",
-            # Some hosted (Cloudflare-fronted) endpoints 403 the default
-            # ``Python-urllib`` User-Agent — send our own.
-            "User-Agent": f"mempalace/{__version__}",
-        }
+        # Some hosted (Cloudflare-fronted) endpoints 403 the default
+        # ``Python-urllib`` User-Agent — send our own.
+        headers = {"User-Agent": f"mempalace/{__version__}"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
@@ -863,14 +849,9 @@ class OpenAICompatEmbeddingFunction:
             # encoding_format=float is explicit so a server that defaults to
             # base64 doesn't hand back strings we'd mis-parse as vectors.
             payload = {"model": self._model, "input": batch, "encoding_format": "float"}
-            req = Request(self._url, data=json.dumps(payload).encode("utf-8"), headers=headers)
             try:
-                with urlopen(req, timeout=_EF_API_TIMEOUT) as resp:
-                    data = json.loads(resp.read())
-            # ValueError covers an invalid/missing URL scheme and json.JSONDecodeError;
-            # http.client.HTTPException covers low-level protocol faults (BadStatusLine,
-            # IncompleteRead) common with local/overloaded servers.
-            except (HTTPError, URLError, OSError, http.client.HTTPException, ValueError) as e:
+                data = post_json(self._url, payload, headers, timeout=_EF_API_TIMEOUT)
+            except LLMError as e:
                 raise EmbeddingAPIError(
                     f"Embedding API request to {self._url} failed: {e}. Check that the "
                     f"server is reachable and MEMPALACE_EMBEDDING_API_URL / embedding_api_url "
@@ -892,14 +873,18 @@ class OpenAICompatEmbeddingFunction:
         """
         import numpy as np
 
+        from mempalace.llm_client import ECHO_LIMIT
+
         if not isinstance(data, dict):
             raise EmbeddingAPIError(
-                f"Embedding API at {self._url} returned a non-object response: {data}"
+                f"Embedding API at {self._url} returned a non-object response: "
+                f"{str(data)[:ECHO_LIMIT]}"
             )
         rows = data.get("data")
         if not isinstance(rows, list):
             raise EmbeddingAPIError(
-                f"Embedding API at {self._url} returned no 'data' array: {data.get('error', data)}"
+                f"Embedding API at {self._url} returned no 'data' array: "
+                f"{str(data.get('error', data))[:ECHO_LIMIT]}"
             )
         if len(rows) != n:
             raise EmbeddingAPIError(
@@ -1104,8 +1089,6 @@ _EMBEDDING_API_HINT = (
     "and that embedding_api_model (and embedding_api_key, if it needs one) are right, "
     "then retry."
 )
-_REFUSALS_LOGGED: set = set()
-_REFUSALS_LOCK = threading.Lock()
 
 
 def _model_error_class(exc: BaseException) -> Optional[type]:
@@ -1139,11 +1122,7 @@ def log_model_refusal(log, kind: str, exc: BaseException, palace_path=None) -> N
     everything else on stderr.
     """
     message = str(exc)
-    key = (str(palace_path or ""), kind, message)
-    with _REFUSALS_LOCK:
-        first = key not in _REFUSALS_LOGGED
-        _REFUSALS_LOGGED.add(key)
-    if first:
+    if first_time("embedding", "refusal", str(palace_path or ""), kind, message):
         log.error("%s: %s", kind, message)
     else:
         log.error(
@@ -1266,9 +1245,7 @@ def _resolve_embedding_model(model) -> str:
         shown = "'' (empty)"
     else:
         shown = repr(name)
-    warning_key = ("unknown-embedding-model", shown)
-    if warning_key not in _WARNED:
-        _WARNED.add(warning_key)
+    if first_time("embedding", "unknown-embedding-model", shown):
         logger.warning(
             "Unknown embedding_model %s; falling back to 'minilm'. Valid values: %s. "
             "Drawers filed meanwhile are embedded with MiniLM, so moving this palace "
@@ -1298,9 +1275,7 @@ def _embeddinggemma2_device(device: Optional[str]) -> str:
     else:
         mapped = "cpu"
         reason = "is not a known device"
-    warn_key = ("embeddinggemma2-device", value)
-    if warn_key not in _WARNED:
-        _WARNED.add(warn_key)
+    if first_time("embedding", "embeddinggemma2-device", value):
         logger.warning(
             "embedding_device=%r %s, so embeddinggemma2 uses %r (supported: %s).",
             value,
@@ -1456,8 +1431,6 @@ def describe_device(device: Optional[str] = None, model: Optional[str] = None) -
 # Probed vector widths, keyed by resolved model name. Populated the first
 # time a probe succeeds for a model; failures are never stored.
 _DIM_CACHE: dict = {}
-# Models whose failed probe was already logged at warning level.
-_DIM_PROBE_WARNED: set = set()
 
 
 def current_model_name(model: Optional[str] = None) -> str:
@@ -1501,8 +1474,7 @@ def probe_dimension(device: Optional[str] = None, model: Optional[str] = None) -
         vectors = ef(input=["probe"])
         dim = len(vectors[0]) if vectors and vectors[0] is not None else 0
     except Exception as exc:
-        log = logger.debug if name in _DIM_PROBE_WARNED else logger.warning
-        _DIM_PROBE_WARNED.add(name)
+        log = logger.warning if first_time("embedding", "dim-probe", name) else logger.debug
         log(
             "Embedding dimension probe failed for model=%s (%s); will retry",
             name,

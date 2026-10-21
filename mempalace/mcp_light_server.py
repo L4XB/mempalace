@@ -38,9 +38,10 @@ from .query_parser import (  # noqa: E402
     parse_query_input,
 )
 from .search_util import _cosine_scale_distance  # noqa: E402
+from .timeutil import recency_key  # noqa: E402
 from .version import __version__  # noqa: E402
 
-logger = logging.getLogger("mempalace_mcp_light")
+logger = logging.getLogger(__name__)
 
 _PQL_KEYWORDS = {
     "FIND",
@@ -197,7 +198,7 @@ def _enrich_search_results(res: Dict[str, Any]) -> Dict[str, Any]:
 
     by_recency = sorted(
         range(len(results_list)),
-        key=lambda i: _search_timestamp(results_list[i]),
+        key=lambda i: recency_key(_search_timestamp(results_list[i])),
         reverse=True,
     )
     for recency_rank, orig_i in enumerate(by_recency, 1):

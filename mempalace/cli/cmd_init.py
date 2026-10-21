@@ -229,7 +229,9 @@ def _record_env_backend(cfg) -> None:
     init points at has nothing on disk yet to detect it from, so without this
     the first mine run without the variable would use the default backend.
     """
-    backend = (os.environ.get("MEMPALACE_BACKEND") or "").strip().lower()
+    from .._env import env_str
+
+    backend = (env_str("MEMPALACE_BACKEND") or "").lower()
     if not backend:
         return
     from ..backends.registry import BackendUnavailableError

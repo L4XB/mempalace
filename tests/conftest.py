@@ -210,6 +210,27 @@ def _realign_default_backend(palace_module):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_one_shot_warnings():
+    """Let every test see the warnings that fire once per process."""
+    from mempalace import _once
+
+    _once.reset()
+
+
+@pytest.fixture(autouse=True)
+def _utc_local_zone(monkeypatch):
+    """Read naive legacy timestamps as UTC so results don't depend on the host zone.
+
+    Tests that need another zone set ``timeutil._LOCAL_TZ`` themselves.
+    """
+    from datetime import timezone
+
+    from mempalace import timeutil
+
+    monkeypatch.setattr(timeutil, "_LOCAL_TZ", timezone.utc)
+
+
+@pytest.fixture(autouse=True)
 def _reset_mcp_cache(monkeypatch):
     """Reset cached MCP state between tests without importing mcp_server.
 
@@ -295,6 +316,10 @@ def _reset_mcp_cache(monkeypatch):
             reset_hnsw_capacity_cache()
         except (ImportError, AttributeError):
             pass
+
+        from mempalace import search_util
+
+        search_util._known_wings_cache.clear()
 
         # Release chromadb clients opened through the backend layer. Many tests
         # reach the store via palace.get_collection() (sweep, repair, CLI, ...),

@@ -38,10 +38,10 @@ import logging
 import os
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
 from itertools import combinations
 from typing import Optional
 
+from . import paths
 from .dynamics import initialize_dynamics_fields
 from .fsio import (
     atomic_write_json as _atomic_write_json,
@@ -50,8 +50,9 @@ from .fsio import (
     remove_abandoned_publish_temps as _remove_abandoned_publish_temps,
 )
 from .metadata_types import is_bookkeeping
+from .timeutil import utc_now_iso
 
-logger = logging.getLogger("mempalace_hallways")
+logger = logging.getLogger(__name__)
 
 # Persistence target is resolved through ``_get_hallway_file`` below, which
 # mirrors ``palace_graph._get_tunnel_file`` (the 3.3.6 palace-scoped pattern)
@@ -100,7 +101,7 @@ def _hallway_file_lock(config=None):
 
 def _legacy_hallway_file() -> str:
     """The pre-palace-scoped hardcoded path. Kept only for one-time orphan detection."""
-    return os.path.join(os.path.expanduser("~"), ".mempalace", "hallways.json")
+    return str(paths.state_path("hallways.json"))
 
 
 def _load_hallways_for_write(config=None) -> list[dict]:
@@ -593,7 +594,7 @@ def _wing_metadata_from_sqlite(col, wing: str) -> Optional[list]:
     scoped read, stopped at its first row, tells it apart from a wing with no
     drawers at all.
     """
-    from .backends.chroma import MetadataRecoveryPending
+    from .backends.chroma_sqlite import MetadataRecoveryPending
     from .palace import _fast_collection_metadata
 
     scope = {"wing": wing}
@@ -839,7 +840,7 @@ def compute_hallways_for_wing(
             }
 
         created: list[dict] = []
-        created_at = datetime.now(timezone.utc).isoformat()
+        created_at = utc_now_iso()
         for key in sorted(pair_counts.keys()):
             count = pair_counts[key]
             if count < min_count:

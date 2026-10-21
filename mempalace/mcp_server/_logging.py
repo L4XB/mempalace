@@ -9,15 +9,13 @@ class _MempalaceLogFilter(logging.Filter):
     Lets the ``MEMPALACE_LOG_FILE`` handler attach to an already-configured
     root logger (a host app embedding the server) without copying the
     host's — or a third-party library's — records into mempalace's diagnostic
-    file. mempalace loggers are ``mempalace`` / ``mempalace.*`` (the dotted
-    ``__name__`` family) plus the flat ``mempalace_mcp`` /
-    ``mempalace_format_miner`` / ``mempalace_hallways`` / ``mempalace_graph``
-    loggers — every one is prefixed ``mempalace``.
+    file. Every mempalace module logs through ``logging.getLogger(__name__)``,
+    so its records are ``mempalace`` or ``mempalace.*``.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         name = record.name
-        return name == "mempalace" or name.startswith(("mempalace.", "mempalace_"))
+        return name == "mempalace" or name.startswith("mempalace.")
 
 
 # Preserved across importlib.reload via globals(): a reload re-executes this
@@ -84,7 +82,7 @@ def _init_logging() -> None:
     # MEMPALACE_LOG_FILE is operator-supplied and opt-in; this is a
     # local-first server (CLAUDE.md design principle), so no path
     # sanitization — the operator's process UID is the trust boundary.
-    log_file = os.environ.get("MEMPALACE_LOG_FILE", "").strip()
+    log_file = env_str("MEMPALACE_LOG_FILE", "")
     file_handler: logging.Handler | None = None
     file_handler_error: Exception | None = None
     if log_file:
@@ -117,7 +115,7 @@ def _init_logging() -> None:
         logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=handlers)
 
     if file_handler_error is not None:
-        logging.getLogger("mempalace_mcp").warning(
+        logging.getLogger(__name__).warning(
             "MEMPALACE_LOG_FILE=%r could not be opened (%s); file logging disabled",
             log_file,
             file_handler_error,
@@ -125,4 +123,4 @@ def _init_logging() -> None:
 
 
 _init_logging()
-logger = logging.getLogger("mempalace_mcp")
+logger = logging.getLogger(__name__)

@@ -9,7 +9,6 @@ import mempalace.embedding as embedding
 @pytest.fixture(autouse=True)
 def isolate_embedding_state(monkeypatch):
     monkeypatch.setattr(embedding, "_EF_CACHE", {})
-    monkeypatch.setattr(embedding, "_WARNED", set())
 
 
 def test_embeddinggemma2_factory_is_lazy_cached_and_identity_tracks_settings(monkeypatch):

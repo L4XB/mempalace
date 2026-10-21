@@ -116,11 +116,8 @@ _config = MempalaceConfig()
 # below) are hidden from tools/list and refused at dispatch (-32003). That is a
 # wider set than the _MUTATING_TOOLS the peer-writer guard uses. Resolved at
 # startup: from MEMPALACE_MCP_READ_ONLY here, and from --read-only by
-# _apply_server_flags(). Computed inline (not via _truthy_env, defined below) so it
-# is available to the request path regardless of import order.
-_READ_ONLY = globals().get("_READ_ONLY", False) or os.environ.get(
-    "MEMPALACE_MCP_READ_ONLY", ""
-).strip().lower() in {"1", "true", "yes", "on"}
+# _apply_server_flags().
+_READ_ONLY = globals().get("_READ_ONLY", False) or env_bool("MEMPALACE_MCP_READ_ONLY", False)
 
 _kg_by_path: dict[str, KnowledgeGraph] = {}
 _kg_cache_lock = threading.Lock()
@@ -131,7 +128,8 @@ _logstream_cache_lock = threading.Lock()
 # Keep that entire scope single-threaded even when tool_search is invoked
 # outside the HTTP dispatch lock (tests, embedded hosts, future transports).
 _cli_search_capture_lock = threading.Lock()
-# Raised by _apply_server_flags() for --palace; _resolve_kg_path() reads it.
+# Raised by _apply_server_flags() for --palace: a palace named that way keeps
+# its knowledge graph inside itself (see paths.historical_knowledge_graph_path).
 _palace_flag_given: bool = globals().get("_palace_flag_given", False)
 
 # MCP server idle auto-exit.  Stale MCP servers from ended Claude
@@ -310,10 +308,6 @@ _stale_library_reported_errors: dict = {}
 _stale_library_reported_drift: list = []
 
 
-def _truthy_env(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _discard_mcp_storage_handles() -> None:
     """Close cached storage handles before changing writer-lease state.
 
@@ -442,7 +436,7 @@ def _acquire_mcp_writer_lock() -> tuple[bool, str]:
         )
 
         backend_name = resolve_backend_name(_config.palace_path)
-        if _truthy_env(_MCP_ALLOW_PEER_WRITER_ENV):
+        if env_bool(_MCP_ALLOW_PEER_WRITER_ENV, False):
             if not backend_requires_single_writer(backend_name):
                 return True, ""
             logger.warning(
@@ -546,24 +540,10 @@ def _startup_integrity_size_limit_bytes() -> int:
     """Byte size above which the startup SQLite quick_check is skipped.
 
     Returns 0 when the gate is disabled (``MEMPALACE_STARTUP_INTEGRITY_MAX_MB``
-    set to 0, a non-positive number, or an unparseable value), meaning the
-    startup probe always runs.
+    set to 0 or a negative number), meaning the startup probe always runs. An
+    unparseable value means the default.
     """
-
-    raw = os.environ.get(_STARTUP_INTEGRITY_MAX_MB_ENV, "").strip()
-    if not raw:
-        mb = _STARTUP_INTEGRITY_MAX_MB_DEFAULT
-    else:
-        try:
-            mb = float(raw)
-        except ValueError:
-            logger.warning(
-                "Invalid %s=%r; using default %.0f MB",
-                _STARTUP_INTEGRITY_MAX_MB_ENV,
-                raw,
-                _STARTUP_INTEGRITY_MAX_MB_DEFAULT,
-            )
-            mb = _STARTUP_INTEGRITY_MAX_MB_DEFAULT
+    mb = env_float(_STARTUP_INTEGRITY_MAX_MB_ENV, _STARTUP_INTEGRITY_MAX_MB_DEFAULT)
     if mb <= 0:
         return 0
     return int(mb * 1024 * 1024)
@@ -885,21 +865,31 @@ def _mcp_sqlite_integrity_refusal(req_id, tool_name: str):
 
 
 def _mcp_idle_timeout_secs() -> float:
-    """Return the configured MCP idle timeout in seconds (0 = disabled)."""
-    raw = os.environ.get(_MCP_IDLE_HOURS_ENV, "")
-    if raw:
-        try:
-            hours = float(raw)
-            return max(0.0, hours) * 3600
-        except ValueError:
-            return 0.0
-    return _MCP_IDLE_HOURS_DEFAULT * 3600
+    """Return the configured MCP idle timeout in seconds (0 = disabled).
+
+    An unparseable value disables the timeout rather than meaning the default.
+    """
+    if env_str(_MCP_IDLE_HOURS_ENV) is None:
+        return _MCP_IDLE_HOURS_DEFAULT * 3600
+    return max(0.0, env_float(_MCP_IDLE_HOURS_ENV, 0.0)) * 3600
 
 
 def _resolve_kg_path() -> str:
-    if _palace_flag_given:
-        return os.path.join(_config.palace_path, "knowledge_graph.sqlite3")
-    return DEFAULT_KG_PATH
+    return paths.knowledge_graph_path(_config.palace_path, explicit=_palace_flag_given)
+
+
+def _with_kg_notice(payload):
+    """Add the palace's knowledge-graph notice, if any, to a KG tool response.
+
+    The notice is also logged, once per process.
+    """
+    notice = knowledge_graph_notice(_config.palace_path, explicit=_palace_flag_given)
+    if notice:
+        if first_time("kg-notice", notice):
+            logger.warning(notice)
+        if isinstance(payload, dict):
+            payload["notice"] = notice
+    return payload
 
 
 def _canonicalize_kg_path(path: str) -> str:
@@ -915,7 +905,7 @@ def _canonicalize_kg_path(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
 
-def _get_kg(canonical_path=None) -> KnowledgeGraph:
+def _get_kg(canonical_path=None, read=False) -> KnowledgeGraph:
     """Return the cached ``KnowledgeGraph`` for the resolved palace.
 
     When ``canonical_path`` is ``None`` (default), the path is resolved
@@ -927,6 +917,9 @@ def _get_kg(canonical_path=None) -> KnowledgeGraph:
     a symlink remap, or a mount remap between the captured value and
     this call drift the insert and evict keys apart, stranding a closed
     handle under one key while the lookup probes another.
+
+    With ``read``, a palace with no graph file gets an empty, uncached
+    in-memory graph: a read never creates the file.
     """
     path = (
         canonical_path if canonical_path is not None else _canonicalize_kg_path(_resolve_kg_path())
@@ -934,6 +927,8 @@ def _get_kg(canonical_path=None) -> KnowledgeGraph:
     kg = _kg_by_path.get(path)
     if kg is not None:
         return kg
+    if read and not os.path.isfile(path):
+        return KnowledgeGraph.empty()
     with _kg_cache_lock:
         kg = _kg_by_path.get(path)
         if kg is None:
@@ -942,7 +937,7 @@ def _get_kg(canonical_path=None) -> KnowledgeGraph:
     return kg
 
 
-def _call_kg(op):
+def _call_kg(op, read=False):
     """Run ``op(kg)`` against the cached KG with one-shot retry on close.
 
     Race we're guarding against: a handler grabs ``kg = _get_kg()`` and is
@@ -969,10 +964,13 @@ def _call_kg(op):
     insert key to the evict key even if FS or env state mutates between
     attempts, preventing a closed handle from leaking under a stale
     key the lookup no longer matches.
+
+    ``read`` ops on a palace with no graph file run against an empty graph
+    (see :func:`_get_kg`).
     """
     path = _canonicalize_kg_path(_resolve_kg_path())
     for attempt in range(2):
-        kg = _get_kg(path)
+        kg = _get_kg(path, read=True) if read else _get_kg(path)
         try:
             return op(kg)
         except sqlite3.ProgrammingError:

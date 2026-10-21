@@ -15,55 +15,23 @@ def _tool_status_via_sqlite() -> dict:
     gets a working status response — and crucially the
     ``vector_disabled`` flag — without us touching the vector segment.
     """
-    import sqlite3 as _sqlite3
+    from ..backends.chroma_sqlite import _sqlite_wing_room_counts
 
-    from ..backends._inproc_sqlite import open_reader as open_palace_reader
-    from ..backends.chroma import not_bookkeeping_sql
-
-    db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
-    if not os.path.isfile(db_path):
+    if not os.path.isfile(os.path.join(_config.palace_path, "chroma.sqlite3")):
         return _no_palace()
-    collection_name = _config.collection_name
-
+    counts = _sqlite_wing_room_counts(_config.palace_path, _config.collection_name)
+    if counts is None:
+        logger.error("tool_status sqlite fallback read failed")
+    total, wing_rooms = counts or (0, {})
+    # "?" is the tally's placeholder for a drawer without that key.
     wings: dict = {}
     rooms: dict = {}
-    total = 0
-    try:
-        conn = open_palace_reader(db_path)
-        try:
-            drawers_only = not_bookkeeping_sql(conn)
-            row = conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM embeddings e
-                JOIN segments s ON e.segment_id = s.id
-                JOIN collections c ON s.collection = c.id
-                WHERE c.name = ? AND {drawers_only}
-                """,
-                (collection_name,),
-            ).fetchone()
-            total = int(row[0]) if row and row[0] is not None else 0
-            for key, target in (("wing", wings), ("room", rooms)):
-                for value, count in conn.execute(
-                    f"""
-                    SELECT em.string_value, COUNT(*)
-                    FROM embedding_metadata em
-                    JOIN embeddings e ON em.id = e.id
-                    JOIN segments s ON e.segment_id = s.id
-                    JOIN collections c ON s.collection = c.id
-                    WHERE c.name = ?
-                      AND em.key = ?
-                      AND em.string_value IS NOT NULL
-                      AND {drawers_only}
-                    GROUP BY em.string_value
-                    """,
-                    (collection_name, key),
-                ):
-                    target[decode_value(value)] = count
-        finally:
-            conn.close()
-    except _sqlite3.Error:
-        logger.exception("tool_status sqlite fallback read failed")
+    for wing, room_counts in wing_rooms.items():
+        for room, n in room_counts.items():
+            if wing != "?":
+                wings[wing] = wings.get(wing, 0) + n
+            if room != "?":
+                rooms[room] = rooms.get(room, 0) + n
 
     result = {
         "total_drawers": total,
@@ -117,7 +85,7 @@ def _sqlite_taxonomy():
     counts = None
     try:
         if _is_chroma_backend():
-            from ..backends.chroma import _sqlite_wing_room_counts
+            from ..backends.chroma_sqlite import _sqlite_wing_room_counts
 
             counts = _sqlite_wing_room_counts(_config.palace_path, _config.collection_name)
         elif _selected_backend_name() in {"sqlite_exact", "rust_exact"}:
@@ -265,7 +233,7 @@ def _chroma_room_wing_hall_counts():
     global _graph_rows_cache
     if not _config.palace_path:
         return None
-    from ..backends.chroma import sqlite_room_wing_hall_counts
+    from ..backends.chroma_sqlite import sqlite_room_wing_hall_counts
 
     # Same full GROUP BY as the status taxonomy; reuse it while chroma.sqlite3
     # has not been written (see _palace_db_fingerprint).
@@ -311,11 +279,14 @@ def _subtract_counts(counts: dict, key, n: int) -> None:
         counts.pop(key, None)
 
 
-def _drop_bookkeeping_facets(col, wings=None, rooms=None, taxonomy=None, wing=None) -> int:
-    """Take registry rows and sentinels out of facet tallies; return how many."""
+def _drop_bookkeeping_facets(col, wings=None, rooms=None, taxonomy=None, only=None) -> int:
+    """Take registry rows and sentinels out of facet tallies; return how many.
+
+    ``only`` limits the drop to rows in those wings.
+    """
     dropped = 0
     for w, room_counts in _bookkeeping_taxonomy(col).items():
-        if wing is not None and w != wing:
+        if only is not None and w not in only:
             continue
         for r, n in room_counts.items():
             dropped += n
@@ -531,12 +502,14 @@ def tool_list_rooms(wing: str = None):
         wing = _sanitize_optional_name(wing, "wing")
     except ValueError as e:
         return {"error": str(e)}
+    # A wing lists the rooms of every spelling its project was filed under.
     fast = _sqlite_taxonomy()
     if fast is not None:
         _total, wing_rooms = fast
+        wings = set(wing_aliases(wing, wing_rooms)) if wing else None
         rooms = {}
         for w, room_counts in wing_rooms.items():
-            if wing and w != wing:
+            if wings is not None and w not in wings:
                 continue
             for r, n in room_counts.items():
                 rooms[r] = rooms.get(r, 0) + n
@@ -546,7 +519,8 @@ def tool_list_rooms(wing: str = None):
         return _collection_error_or_no_palace()
     rooms = {}
     result = {"wing": wing or "all", "rooms": rooms}
-    where = {"wing": wing} if wing else None
+    wings = wing_aliases(wing, known_wings(col)) if wing else None
+    where = {"wing": {"$in": wings}} if wing else None
     try:
         try:
             if not _supports_metadata_facets(col):
@@ -555,7 +529,7 @@ def tool_list_rooms(wing: str = None):
             rooms.update(temp_rooms)
             try:
                 if wing:
-                    wing_count = col.facet_counts("wing", where={"wing": wing}).get(wing, 0)
+                    wing_count = sum(col.facet_counts("wing", where=where).values())
                     unknown_rooms = wing_count - sum(temp_rooms.values())
                 else:
                     unknown_rooms = col.count() - sum(temp_rooms.values())
@@ -563,7 +537,7 @@ def tool_list_rooms(wing: str = None):
                     rooms["unknown"] = rooms.get("unknown", 0) + unknown_rooms
             except (TypeError, ValueError):
                 pass
-            _drop_bookkeeping_facets(col, rooms=rooms, wing=wing)
+            _drop_bookkeeping_facets(col, rooms=rooms, only=wings)
         except Exception as e:
             if _supports_metadata_facets(col):
                 logger.warning(

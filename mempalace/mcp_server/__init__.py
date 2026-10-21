@@ -79,7 +79,12 @@ from urllib.parse import urlparse  # noqa: E402
 
 from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: E402
 
-from .. import tool_capabilities as _tool_capabilities  # noqa: E402
+from .. import (  # noqa: E402
+    paths,
+    tool_capabilities as _tool_capabilities,
+)
+from .._env import env_bool, env_float, env_int, env_list, env_str  # noqa: E402
+from .._once import first_time  # noqa: E402
 from ..backends import BackendMismatchError, PalaceRef, detect_backend_for_path  # noqa: E402
 from ..backends.base import (  # noqa: E402
     DimensionMismatchError,
@@ -103,12 +108,14 @@ from ..backends.chroma import (  # noqa: E402
 from ..collision_scan import assert_no_collisions  # noqa: E402
 from ..config import (  # noqa: E402
     MempalaceConfig,
+    normalize_wing_name,
     sanitize_content,
     sanitize_iso_temporal,
     sanitize_kg_value,
     sanitize_name,
     sqlite_read_uri,
     strip_lone_surrogates,
+    wing_aliases,
 )
 from ..date_window import filed_at_in_window, parse_date_bound  # noqa: E402
 from ..embedding import (  # noqa: E402
@@ -122,7 +129,7 @@ from ..hallways import (  # noqa: E402
     list_hallways,
 )
 from ..ids import ID_RECIPE, make_drawer_id_from_content  # noqa: E402
-from ..knowledge_graph import DEFAULT_KG_PATH, KnowledgeGraph  # noqa: E402
+from ..knowledge_graph import KnowledgeGraph, knowledge_graph_notice  # noqa: E402
 from ..logstream import LOGSTREAM_DB_FILENAME, Logstream  # noqa: E402
 from ..metadata_types import BOOKKEEPING_WHERE, is_bookkeeping  # noqa: E402
 from ..palace_graph import (  # noqa: E402
@@ -137,6 +144,7 @@ from ..palace_graph import (  # noqa: E402
     traverse,
 )
 from ..query_sanitizer import sanitize_query, sanitizer_report  # noqa: E402
+from ..search_util import chroma_known_wings, known_wings  # noqa: E402
 from ..searcher import (  # noqa: E402
     SearchError,
     _distance_to_similarity,
@@ -152,6 +160,7 @@ from ..stored_text import (  # noqa: E402
     dumps_client,
     dumps_internal,
 )
+from ..timeutil import recency_key, utc_now_iso, utc_now_z  # noqa: E402
 from ..version import __version__  # noqa: E402
 
 # ==================== WRITE-AHEAD LOG ====================

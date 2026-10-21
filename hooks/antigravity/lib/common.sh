@@ -353,14 +353,15 @@ mempal_is_valid_transcript_path() {
 # ── Wing inference ────────────────────────────────────────────────────
 #
 # Takes the first workspace path from workspacePaths[] (already
-# extracted into $1) and derives a `wing_<slug>` name from its leaf
-# directory. Hyphens become underscores; spaces become underscores.
-# Empty input yields wing_sessions, matching mempalace.hooks_cli's
-# fallback.
+# extracted into $1) and derives the project wing from its leaf
+# directory: the slug mempalace.config.normalize_wing_name gives (ASCII
+# names; tests/test_wing_slug_shell.py pins parity), the same wing the
+# diary, `mempalace mine` and the other harness hooks use. Empty input
+# yields sessions, matching mempalace.hooks_cli's fallback.
 mempal_infer_wing() {
     local workspace="$1"
     if [ -z "$workspace" ]; then
-        printf 'wing_sessions'
+        printf 'sessions'
         return 0
     fi
     # Strip trailing slashes
@@ -368,19 +369,35 @@ mempal_infer_wing() {
         workspace="${workspace%/}"
     done
     if [ -z "$workspace" ]; then
-        printf 'wing_sessions'
+        printf 'sessions'
         return 0
     fi
     local leaf="${workspace##*/}"
     if [ -z "$leaf" ]; then
-        printf 'wing_sessions'
+        printf 'sessions'
         return 0
     fi
-    # Lowercase + hyphens-to-underscores. tr is bash 3.2 safe; ${var^^}
-    # / ${var//-/_} on a fresh expansion are bash 4+ only.
-    local slug
-    slug=$(printf '%s' "$leaf" | tr 'A-Z' 'a-z' | tr ' -' '__')
-    printf 'wing_%s' "$slug"
+    # tr and sed work on bytes, so a name with non-ASCII bytes asks
+    # mempalace.config.normalize_wing_name itself, keeping the workspace
+    # directory off sys.path as mempal_hook_run.sh does.
+    local slug=""
+    if printf '%s' "$leaf" | LC_ALL=C grep -q '[^ -~]'; then
+        slug=$(PYTHONSAFEPATH=1 "$MEMPAL_PYTHON_BIN" -c 'import sys
+if sys.path and sys.path[0] == "": del sys.path[0]
+from mempalace.config import normalize_wing_name
+slug = normalize_wing_name(sys.argv[1])
+sys.stdout.buffer.write(slug.encode("utf-8", "surrogateescape"))' "$leaf" 2>/dev/null) || slug=""
+    fi
+    # tr and sed with bracket ranges stay bash 3.2 safe; ${var,,} is 4+.
+    if [ -z "$slug" ]; then
+        slug=$(printf '%s' "$leaf" \
+            | LC_ALL=C tr 'A-Z' 'a-z' \
+            | LC_ALL=C tr ' -' '__' \
+            | LC_ALL=C sed -e "s/[^a-z0-9_.']\{1,\}/_/g" -e 's/\.\{2,\}/./g' \
+            | cut -c1-120 \
+            | LC_ALL=C sed -e "s/^[_.']*//" -e "s/[_.']*\$//")
+    fi
+    printf '%s' "${slug:-sessions}"
 }
 
 # ── Save-interval floor ───────────────────────────────────────────────

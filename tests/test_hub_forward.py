@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from mempalace import cli, mcp_proxy, server_registry
+from mempalace import cli, hub_client, server_registry
 from mempalace.config import MempalaceConfig
 
 
@@ -159,13 +159,13 @@ class TestServerRegistry:
         token_path.write_text("palace-b-token\n")
         monkeypatch.setenv("MEMPALACE_MCP_HTTP_TOKEN", "palace-a-token")
 
-        assert server_registry.load_server_token(palace) == "palace-b-token"
+        assert server_registry.load_server_tokens(palace)[0] == "palace-b-token"
 
     def test_process_environment_is_fallback_without_palace_token(self, isolated_home, monkeypatch):
         palace = str(isolated_home / "palace")
         monkeypatch.setenv("MEMPALACE_MCP_HTTP_TOKEN", "explicit-token")
 
-        assert server_registry.load_server_token(palace) == "explicit-token"
+        assert server_registry.load_server_tokens(palace) == ("explicit-token",)
 
 
 # ── mine forwarding ──────────────────────────────────────────────────
@@ -981,7 +981,7 @@ class TestStdioProxy:
         def broken_off(*a):
             raise error
 
-        monkeypatch.setattr(mcp_server, "_forward_request_to_hub", broken_off)
+        monkeypatch.setattr(hub_client.HubClient, "post", broken_off)
         write = {
             "jsonrpc": "2.0",
             "id": 9,
@@ -1040,12 +1040,8 @@ class TestThinStdioProxyTokenRetry:
             monkeypatch.setenv("MEMPALACE_MCP_HTTP_TOKEN", "current-token")
             request = {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}
 
-            response = mcp_proxy._forward(
-                f"http://127.0.0.1:{hub.port}",
-                {"Content-Type": "application/json"},
-                request,
-                palace,
-            )
+            client = hub_client.HubClient(palace, {"host": "127.0.0.1", "port": hub.port})
+            response = client.post(request)
 
             assert response["id"] == 7
             assert hub.auth_headers == ["Bearer stale-token", "Bearer current-token"]
@@ -1168,7 +1164,7 @@ class TestCmdMineIntegration:
         def uncertain(*args, **kwargs):
             raise TimeoutError("response lost after submission")
 
-        monkeypatch.setattr(server_registry, "urlopen_with_server_tokens", uncertain)
+        monkeypatch.setattr(hub_client.HubClient, "post", uncertain)
         args = _mine_args(
             tmp_path / "project", palace=palace, mode="projects", include_ignored=["notes"]
         )

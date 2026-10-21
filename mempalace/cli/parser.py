@@ -774,6 +774,18 @@ def main():
     p_kg_norm.add_argument("--llm-api-key", default=None)
     p_kg_norm.add_argument("--llm-timeout", type=int, default=600)
     p_kg_norm.add_argument("--accept-external-llm", action="store_true")
+    p_kg_import = kg_sub.add_parser(
+        "import-legacy",
+        help="Copy facts from another knowledge graph file into this palace's graph "
+        "(dry run first; --yes applies; rows already here are kept)",
+    )
+    p_kg_import.add_argument(
+        "--from",
+        dest="source",
+        default=None,
+        help="Graph file to copy from (default: ~/.mempalace/knowledge_graph.sqlite3)",
+    )
+    p_kg_import.add_argument("--yes", action="store_true", help="Write the copied rows")
     p_tunnels = sub.add_parser("tunnels", help="Propose or prune cross-wing tunnels")
     tunnels_sub = p_tunnels.add_subparsers(dest="tunnels_action")
     p_tunnels_propose = tunnels_sub.add_parser(

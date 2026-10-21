@@ -1281,7 +1281,7 @@ def test_sqlite_wing_room_counts_exact_tally(palace_path, seeded_collection):
     join multiplied rows (e.g. a drawer carrying several metadata keys), the
     total would exceed 4 and the room counts would inflate.
     """
-    from mempalace.backends.chroma import _sqlite_wing_room_counts
+    from mempalace.backends.chroma_sqlite import _sqlite_wing_room_counts
 
     result = _sqlite_wing_room_counts(palace_path, "mempalace_drawers")
     assert result is not None
@@ -1299,7 +1299,7 @@ def test_status_falls_back_to_chroma_when_sqlite_unreadable(palace_path, seeded_
     correct tally — not crash or print nothing."""
     from unittest.mock import patch
 
-    with patch("mempalace.backends.chroma._sqlite_wing_room_counts", return_value=None):
+    with patch("mempalace.backends.chroma_sqlite._sqlite_wing_room_counts", return_value=None):
         status(palace_path)
 
     out = capsys.readouterr().out
@@ -1313,7 +1313,7 @@ def test_sqlite_wing_room_counts_none_when_collection_absent(palace_path):
     printing a misleading ``0 drawers`` tally (State C, #1498)."""
     import chromadb
 
-    from mempalace.backends.chroma import _sqlite_wing_room_counts
+    from mempalace.backends.chroma_sqlite import _sqlite_wing_room_counts
 
     chromadb.PersistentClient(path=palace_path)  # creates chroma.sqlite3, no collection
     assert _sqlite_wing_room_counts(palace_path, "mempalace_drawers") is None
@@ -1325,7 +1325,7 @@ def test_sqlite_wing_room_counts_numeric_wing_not_dropped(palace_path, collectio
     ChromaDB path, which surfaces the native number — not silently bucketed
     under '?'. Without the int/float COALESCE this row would vanish into '?'
     while returning a non-None result that skips the fallback."""
-    from mempalace.backends.chroma import _sqlite_wing_room_counts
+    from mempalace.backends.chroma_sqlite import _sqlite_wing_room_counts
 
     collection.add(
         ids=["drawer_numeric_meta"],
@@ -1343,7 +1343,7 @@ def test_sqlite_wing_room_counts_partial_metadata_buckets_question_mark(palace_p
     '?' for the missing axis, never dropped. Guards the LEFT JOINs against
     being narrowed to inner joins, which would silently discard partial
     drawers and undercount the total."""
-    from mempalace.backends.chroma import _sqlite_wing_room_counts
+    from mempalace.backends.chroma_sqlite import _sqlite_wing_room_counts
 
     collection.add(
         ids=["drawer_wing_only", "drawer_room_only"],
@@ -1368,7 +1368,7 @@ def test_sqlite_wing_room_counts_returns_none_on_locked_db(palace_path, seeded_c
     import sqlite3 as _sqlite3
     from unittest.mock import patch
 
-    from mempalace.backends.chroma import _sqlite_wing_room_counts
+    from mempalace.backends.chroma_sqlite import _sqlite_wing_room_counts
 
     with patch(
         "mempalace.backends.chroma.sqlite3.connect",
@@ -3375,7 +3375,7 @@ def test_metadata_scan_reads_a_schema_without_bool_value():
     the table has instead of failing on the missing one."""
     import sqlite3
 
-    from mempalace.backends.chroma import _sqlite_iter_metadata
+    from mempalace.backends.chroma_sqlite import _sqlite_iter_metadata
 
     with sqlite3.connect(":memory:") as conn:
         conn.executescript(

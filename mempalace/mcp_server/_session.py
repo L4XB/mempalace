@@ -584,6 +584,24 @@ def _is_chroma_backend() -> bool:
         return False
 
 
+def _palace_known_wings() -> frozenset:
+    """The palace's stored wing names, for ``wing_aliases``.
+
+    Chroma reads them from sqlite, without opening the collection.
+    """
+    if _is_chroma_backend() and _config.palace_path:
+        return chroma_known_wings(_config.palace_path)
+    try:
+        return known_wings(_get_collection())
+    except Exception:
+        return frozenset()
+
+
+def _palace_wing_aliases(wing: str) -> list:
+    """``wing_aliases`` for ``wing`` with the palace's stored wing names."""
+    return wing_aliases(wing, _palace_known_wings())
+
+
 def _backend_db_exists() -> bool:
     try:
         return detect_backend_for_path(_config.palace_path) is not None

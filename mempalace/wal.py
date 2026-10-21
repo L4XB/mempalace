@@ -15,13 +15,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
 
-from .config import _default_config_dir
+from .paths import config_dir
+from .timeutil import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
-_WAL_FILE = _default_config_dir() / "wal" / "write_log.jsonl"
+_WAL_FILE = config_dir() / "wal" / "write_log.jsonl"
 _WAL_INITIALIZED_DIR = None
 
 # Keys whose values should be redacted in WAL entries to avoid logging sensitive content
@@ -94,7 +94,7 @@ def _wal_log(operation: str, params: dict, result: dict = None):
         else:
             safe_params[k] = v
     entry = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": utc_now_iso(),
         "operation": operation,
         "params": safe_params,
         "result": result,
@@ -127,7 +127,7 @@ def _wal_result(operation: str, result: dict):
     error contract.
     """
     entry = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": utc_now_iso(),
         "operation": operation,
         "result": result,
     }

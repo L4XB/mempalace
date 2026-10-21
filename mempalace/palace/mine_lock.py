@@ -28,7 +28,7 @@ def mine_lock(source_file: str):
 
 
 def _mine_lock_path(source_file: str) -> str:
-    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    lock_dir = paths.lock_dir()
     os.makedirs(lock_dir, exist_ok=True)
     return os.path.join(lock_dir, hashlib.sha256(source_file.encode()).hexdigest()[:16] + ".lock")
 
@@ -256,7 +256,7 @@ def reap_stale_mine_locks(*, min_age_seconds: int = 3600) -> tuple[int, int]:
     Returns ``(reaped, skipped)`` counts, for logging/testing — callers
     don't need to act on them.
     """
-    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    lock_dir = paths.lock_dir()
     try:
         entries = os.listdir(lock_dir)
     except OSError:
@@ -294,7 +294,7 @@ def _maybe_reap_stale_mine_locks() -> None:
     are swallowed — lock maintenance must never be allowed to break an
     actual mine.
     """
-    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    lock_dir = paths.lock_dir()
     marker = os.path.join(lock_dir, ".last_reap")
     try:
         if (

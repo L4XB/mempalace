@@ -31,13 +31,14 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     if wing:
         wing = sanitize_name(wing)
     else:
-        wing = f"wing_{agent_name.replace(' ', '_')}"
+        wing = f"wing_{normalize_wing_name(agent_name) or agent_name}"
     room = "diary"
     col = _get_collection(create=True)
     if not col:
         return _collection_error_or_no_palace()
 
     now = datetime.now()
+    filed_at = utc_now_iso()
     entry_id = (
         f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}_"
         f"{hashlib.sha256(entry.encode()).hexdigest()[:12]}"
@@ -65,7 +66,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "topic": topic,
             "type": "diary_entry",
             "agent": agent_name,
-            "filed_at": now.isoformat(),
+            "filed_at": filed_at,
             "date": now.strftime("%Y-%m-%d"),
         }
         chunk_size = _config.chunk_size
@@ -81,7 +82,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
                 "entry_id": entry_id,
                 "agent": agent_name,
                 "topic": topic,
-                "timestamp": now.isoformat(),
+                "timestamp": filed_at,
                 "chunks": 1,
             }
 
@@ -128,7 +129,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "entry_id": entry_id,
             "agent": agent_name,
             "topic": topic,
-            "timestamp": now.isoformat(),
+            "timestamp": filed_at,
             "chunks": len(chunk_ids),
             "chunk_ids": chunk_ids,
         }
@@ -172,13 +173,13 @@ def _sqlite_diary_read(agent_name: str, last_n: int, wing: str):
     if not _is_chroma_backend():
         return None
     try:
-        from ..backends.chroma import sqlite_diary_rows
+        from ..backends.chroma_sqlite import sqlite_diary_rows
 
         result = sqlite_diary_rows(
             _config.palace_path,
             _config.collection_name,
             agent_name=agent_name,
-            wing=wing,
+            wing=_palace_wing_aliases(wing) if wing else "",
             limit=last_n,
         )
         if result is None:
@@ -208,9 +209,11 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
 
     When ``wing`` is provided, reads only from that wing. When ``wing``
     is empty or omitted, returns entries from every wing this agent has
-    written to. Diary writes from hooks land in project-derived wings
-    (``wing_<project>``), so requiring a specific wing on read would
-    silo those entries from agent-initiated reads.
+    written to. Diary writes from hooks land in the project's wing, so
+    requiring a specific wing on read would silo those entries from
+    agent-initiated reads. A wing matches every spelling its project was
+    filed under (``wing_aliases``), so entries written under an older slug
+    are still read.
 
     Note: ``agent_name`` is normalized to lowercase before filtering so
     that reads are case-insensitive. Entries written under
@@ -236,7 +239,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     # empty-string-as-no-filter convention, for LLM ergonomics).
     conditions = [{"room": "diary"}, {"agent": agent_name}]
     if wing:
-        conditions.insert(0, {"wing": wing})
+        conditions.insert(0, {"wing": {"$in": _palace_wing_aliases(wing)}})
 
     try:
         where = {"$and": conditions}
@@ -273,7 +276,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
 
             # Keep memory bounded while scanning: only candidates for the
             # final newest-N result need to survive into the next page.
-            entries.sort(key=lambda x: x["timestamp"], reverse=True)
+            entries.sort(key=lambda x: recency_key(x["timestamp"]), reverse=True)
             del entries[last_n:]
 
             offset += len(batch_ids)
@@ -332,7 +335,7 @@ def tool_hook_settings(silent_save: bool = None, desktop_toast: bool = None):
 
 def tool_memories_filed_away():
     """Acknowledge the latest silent checkpoint. Returns a short summary."""
-    state_dir = Path.home() / ".mempalace" / "hook_state"
+    state_dir = paths.state_path("hook_state")
     ack_file = state_dir / "last_checkpoint"
     if not ack_file.is_file():
         return {

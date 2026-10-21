@@ -397,9 +397,14 @@ def _classify_under_identity(
 
 
 def _iter_drawer_metadata(col, wing: Optional[str]):
-    """Yield (id, metadata) tuples from the drawers collection in batches."""
+    """Yield (id, metadata) tuples from the drawers collection in batches.
+
+    A wing reads every spelling its project was filed under.
+    """
+    from .search_util import build_where_filter
+
     offset = 0
-    where = {"wing": wing} if wing else None
+    where = build_where_filter(wing, col=col) or None
     while True:
         kwargs = {"include": ["metadatas"], "limit": _BATCH, "offset": offset}
         if where:

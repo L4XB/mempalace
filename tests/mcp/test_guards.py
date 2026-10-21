@@ -1185,7 +1185,7 @@ def test_integrity_failure_log_names_the_sqlite_build(monkeypatch, tmp_path, cap
     monkeypatch.setattr(mcp_server, "_sqlite_integrity_check_error", "")
     monkeypatch.setattr(mcp_server, "_sqlite_integrity_no_verdict_reason", "")
 
-    with caplog.at_level(logging.ERROR, logger="mempalace_mcp"):
+    with caplog.at_level(logging.ERROR, logger="mempalace"):
         mcp_server._refresh_sqlite_integrity_status()
 
     failures = [

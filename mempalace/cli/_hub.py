@@ -5,14 +5,12 @@ if __name__ != "mempalace.cli":
 
 from ..hub_client import (
     HUB_FORWARD_ENV as _HUB_FORWARD_ENV,
-    _forwarding_disabled as _hub_forward_disabled,
-    hub_request_headers,
+    HubClient,
     search_fingerprint_matches,
     search_settings_overridden,
+    tool_result,
 )
-from ..stored_text import dumps_internal
 
-_HUB_HEALTH_TIMEOUT_S = 0.75
 # A backfill mine over a large transcript tree can legitimately run for many
 # minutes inside the hub; the forwarder is a background/CLI process, not a
 # hook-budgeted one, so it waits.
@@ -129,31 +127,12 @@ def _forward_search_to_hub(args, palace_path: str) -> bool:
     private copy. If the hub accepts the request but fails mid-flight, do not
     fall back locally: that would recreate the memory spike this path avoids.
     """
-    import json
     import urllib.error
-    import urllib.request
 
-    from .. import server_registry
-
-    if _hub_forward_disabled():
+    hub = HubClient.discover(palace_path, include_self=True)
+    if hub is None or "search_cli_compatible" not in hub.capabilities:
         return False
-    info = server_registry.read_live_serverinfo(palace_path)
-    if not info:
-        return False
-    if "search_cli_compatible" not in info.get("capabilities", []):
-        return False
-    if not search_fingerprint_matches(info, palace_path):
-        return False
-
-    base_url = server_registry.client_base_url(info)
-    headers = hub_request_headers()
-
-    try:
-        health = urllib.request.Request(f"{base_url}/healthz", headers=headers)
-        with urllib.request.urlopen(health, timeout=_HUB_HEALTH_TIMEOUT_S) as resp:
-            if resp.status != 200:
-                return False
-    except (urllib.error.URLError, OSError, ValueError):
+    if not search_fingerprint_matches(hub.info, palace_path) or not hub.healthy():
         return False
 
     arguments = {
@@ -166,24 +145,8 @@ def _forward_search_to_hub(args, palace_path: str) -> bool:
         if value:
             arguments[name] = value
 
-    body = dumps_internal(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "mempalace_search", "arguments": arguments},
-        }
-    ).encode("utf-8")
-
     try:
-        with server_registry.urlopen_with_server_tokens(
-            palace_path,
-            f"{base_url}/mcp",
-            data=body,
-            headers=headers,
-            timeout=_HUB_SEARCH_TIMEOUT_S,
-        ) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        payload = hub.call_tool("mempalace_search", arguments, timeout=_HUB_SEARCH_TIMEOUT_S)
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             # Authentication failed before the Hub accepted the search, so
@@ -195,7 +158,7 @@ def _forward_search_to_hub(args, palace_path: str) -> bool:
         sys.exit(1)
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
         print(
-            f"mempalace: hub at {base_url} did not complete the search ({exc}); "
+            f"mempalace: hub at {hub.base_url} did not complete the search ({exc}); "
             "not retrying directly because that would load another full index. "
             f"Set {_HUB_FORWARD_ENV}=0 to force a direct search.",
             file=sys.stderr,
@@ -203,7 +166,7 @@ def _forward_search_to_hub(args, palace_path: str) -> bool:
         sys.exit(1)
 
     print(
-        f"mempalace: forwarding search to palace hub {base_url} (pid {info.get('pid')})",
+        f"mempalace: forwarding search to palace hub {hub.base_url} (pid {hub.pid})",
         file=sys.stderr,
     )
 
@@ -216,7 +179,7 @@ def _forward_search_to_hub(args, palace_path: str) -> bool:
         sys.exit(1)
 
     try:
-        result = json.loads(payload["result"]["content"][0]["text"])
+        result = tool_result(payload)
     except (KeyError, IndexError, TypeError, ValueError):
         print("mempalace: hub returned an unrecognized search response", file=sys.stderr)
         sys.exit(1)
@@ -263,27 +226,10 @@ def _forward_mine_to_hub(args, palace_path: str, *, include_ignored=None) -> boo
     Once the hub has accepted the request there is no fallback: the job may
     already be running, and re-mining directly would race it.
     """
-    import json
     import urllib.error
-    import urllib.request
 
-    from .. import server_registry
-
-    if _hub_forward_disabled():
-        return False
-    info = server_registry.read_live_serverinfo(palace_path)
-    if not info or info.get("read_only"):
-        return False
-
-    base_url = server_registry.client_base_url(info)
-    headers = hub_request_headers()
-
-    try:
-        health = urllib.request.Request(f"{base_url}/healthz", headers=headers)
-        with urllib.request.urlopen(health, timeout=_HUB_HEALTH_TIMEOUT_S) as resp:
-            if resp.status != 200:
-                return False
-    except (urllib.error.URLError, OSError, ValueError):
+    hub = HubClient.discover(palace_path, include_self=True)
+    if hub is None or hub.read_only or not hub.healthy():
         return False
 
     mode = getattr(args, "mode", None) or "projects"
@@ -293,14 +239,13 @@ def _forward_mine_to_hub(args, palace_path: str, *, include_ignored=None) -> boo
 
     # Older hubs cannot express these overrides. Never discard one or compete
     # with their lifetime writer lease by silently opening a local writer.
-    capabilities = info.get("capabilities") or []
     for requested, capability, flag in (
         (include_ignored, "mine_include_ignored", "--include-ignored"),
         (include_subagents, "mine_include_subagents", "--include-subagents"),
     ):
-        if requested and capability not in capabilities:
+        if requested and capability not in hub.capabilities:
             print(
-                f"mempalace: palace hub {base_url} (pid {info.get('pid')}) does not support "
+                f"mempalace: palace hub {hub.base_url} (pid {hub.pid}) does not support "
                 f"{flag}; upgrade MemPalace in the hub's environment and restart "
                 "the hub before retrying. No mine was submitted or run locally.",
                 file=sys.stderr,
@@ -321,32 +266,17 @@ def _forward_mine_to_hub(args, palace_path: str, *, include_ignored=None) -> boo
         arguments["include_ignored"] = include_ignored
     if include_subagents:
         arguments["include_subagents"] = True
-    body = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "mempalace_mine", "arguments": arguments},
-        }
-    ).encode("utf-8")
 
-    print(f"mempalace: forwarding mine to palace hub {base_url} (pid {info.get('pid')})")
+    print(f"mempalace: forwarding mine to palace hub {hub.base_url} (pid {hub.pid})")
     try:
-        with server_registry.urlopen_with_server_tokens(
-            palace_path,
-            f"{base_url}/mcp",
-            data=body,
-            headers=headers,
-            timeout=_HUB_MINE_TIMEOUT_S,
-        ) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        payload = hub.call_tool("mempalace_mine", arguments, timeout=_HUB_MINE_TIMEOUT_S)
     except urllib.error.HTTPError as exc:
         # The hub answered — the request reached it, so no direct fallback.
         print(f"mempalace: hub rejected mine ({exc.code} {exc.reason})", file=sys.stderr)
         sys.exit(1)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         print(
-            f"mempalace: hub at {base_url} did not complete the mine ({exc}); "
+            f"mempalace: hub at {hub.base_url} did not complete the mine ({exc}); "
             "not retrying directly — the hub may still be running the job. "
             f"Set {_HUB_FORWARD_ENV}=0 to force direct mines.",
             file=sys.stderr,
@@ -362,7 +292,7 @@ def _forward_mine_to_hub(args, palace_path: str, *, include_ignored=None) -> boo
         sys.exit(1)
 
     try:
-        result = json.loads(payload["result"]["content"][0]["text"])
+        result = tool_result(payload)
     except (KeyError, IndexError, TypeError, ValueError):
         print("mempalace: hub returned an unrecognized mine response", file=sys.stderr)
         sys.exit(1)

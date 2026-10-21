@@ -1148,8 +1148,8 @@ def test_proxied_loopback_hub_requires_the_stored_token(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp, "_config", SimpleNamespace(palace_path=palace, backend="chroma"))
     httpd = mcp._build_http_server("127.0.0.1", 0)
     try:
-        token = server_registry.load_server_token(palace)
-        assert token and httpd.auth_token == token
+        tokens = server_registry.load_server_tokens(palace)
+        assert tokens and httpd.auth_token == tokens[0]
     finally:
         httpd.server_close()
 
@@ -1576,7 +1576,7 @@ def test_handle_error_quiets_client_disconnect(caplog, monkeypatch, disconnect_e
         )
         addr = ("127.0.0.1", 51234)
 
-        with caplog.at_level(logging.DEBUG, logger="mempalace_mcp"):
+        with caplog.at_level(logging.DEBUG, logger="mempalace"):
             try:
                 raise disconnect_exc
             except type(disconnect_exc):
@@ -1585,7 +1585,7 @@ def test_handle_error_quiets_client_disconnect(caplog, monkeypatch, disconnect_e
         assert delegated == []  # noisy default handler NOT invoked
         rec = next(r for r in caplog.records if "disconnect" in r.getMessage().lower())
         assert rec.levelno == logging.DEBUG
-        assert rec.name == "mempalace_mcp"
+        assert rec.name == "mempalace.mcp_server"
     finally:
         httpd.server_close()
 

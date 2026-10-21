@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from . import paths
 from .fsio import (
     CorruptStateError,
     atomic_write_text as _atomic_write_text,
@@ -158,7 +159,7 @@ class EntityRegistry:
     }
     """
 
-    DEFAULT_PATH = Path.home() / ".mempalace" / "entity_registry.json"
+    DEFAULT_PATH = paths.state_path("entity_registry.json")
 
     def __init__(self, data: dict, path: Path):
         self._data = data

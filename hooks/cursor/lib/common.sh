@@ -414,10 +414,10 @@ mempal_gc_stale_state() {
 
 # ── Workspace → wing inference ────────────────────────────────────────
 #
-# basename(workspace_root), normalised to [a-z0-9_-]. Edge cases:
+# basename(workspace_root), slugged like normalize_wing_name. Edge cases:
 #   /              → "root"
 #   /path/         → trailing slash stripped, then basename
-#   "/foo bar/"    → "foo_bar" (spaces collapsed to underscores)
+#   "/foo bar/"    → "foo_bar" (spaces and hyphens become underscores)
 #   ""             → "cursor_session"
 #   "C:\\proj"     → "proj" (Windows-style path; basename via tr fallback)
 #
@@ -444,14 +444,28 @@ mempal_infer_wing() {
     case "$base" in
         *\\*) base="${base##*\\}" ;;
     esac
-    # Lowercase + replace anything outside [a-z0-9_-] with underscore.
-    # Collapse runs of underscores so "foo  bar" doesn't become
-    # "foo__bar".
-    base="$(printf '%s' "$base" \
-        | tr '[:upper:]' '[:lower:]' \
-        | tr -c 'a-z0-9_-' '_' \
-        | tr -s '_' \
-        | sed 's/^_//; s/_$//')"
+    # The same slug mempalace.config.normalize_wing_name gives, so a
+    # workspace lands in the wing `mempalace mine` and the other harness
+    # hooks use (tests/test_wing_slug.py pins parity). tr and sed work on
+    # bytes, so a name with non-ASCII bytes asks Python itself, keeping
+    # the workspace directory off sys.path as mempal_hook_run.sh does.
+    local slug=""
+    if printf '%s' "$base" | LC_ALL=C grep -q '[^ -~]'; then
+        slug="$(PYTHONSAFEPATH=1 "$MEMPAL_PYTHON_BIN" -c 'import sys
+if sys.path and sys.path[0] == "": del sys.path[0]
+from mempalace.config import normalize_wing_name
+slug = normalize_wing_name(sys.argv[1])
+sys.stdout.buffer.write(slug.encode("utf-8", "surrogateescape"))' "$base" 2>/dev/null)" || slug=""
+    fi
+    if [ -z "$slug" ]; then
+        slug="$(printf '%s' "$base" \
+            | LC_ALL=C tr 'A-Z' 'a-z' \
+            | LC_ALL=C tr ' -' '__' \
+            | LC_ALL=C sed -e "s/[^a-z0-9_.']\{1,\}/_/g" -e 's/\.\{2,\}/./g' \
+            | cut -c1-120 \
+            | LC_ALL=C sed -e "s/^[_.']*//" -e "s/[_.']*\$//")"
+    fi
+    base="$slug"
     if [ -z "$base" ]; then
         printf 'cursor_session'
         return 0

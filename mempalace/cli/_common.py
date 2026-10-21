@@ -121,8 +121,9 @@ def _run_pass_zero(project_dir, palace_dir, llm_provider) -> dict:
     stderr; init never blocks on them.
     """
     import json
-    from datetime import datetime, timezone
     from pathlib import Path
+
+    from ..timeutil import utc_now_iso
 
     samples = _gather_origin_samples(project_dir)
     if not samples:
@@ -176,11 +177,11 @@ def _run_pass_zero(project_dir, palace_dir, llm_provider) -> dict:
 
     wrapped = {
         "schema_version": 1,
-        "detected_at": datetime.now(timezone.utc).isoformat(),
+        "detected_at": utc_now_iso(),
         "result": result.to_dict(),
     }
 
-    origin_path = Path(palace_dir).expanduser() / ".mempalace" / "origin.json"
+    origin_path = Path(palace_dir).expanduser() / paths.DIRNAME / "origin.json"
     try:
         origin_path.parent.mkdir(parents=True, exist_ok=True)
         with open(origin_path, "w", encoding="utf-8") as f:

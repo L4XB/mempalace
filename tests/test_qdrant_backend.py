@@ -3,7 +3,12 @@ import uuid
 
 import numpy as np
 import pytest
-from _backend_conformance import assert_partition_isolation, assert_update_skips_missing_ids
+from _backend_conformance import (
+    assert_partition_isolation,
+    assert_update_skips_missing_ids,
+    assert_where_filters_conform,
+    assert_write_batch_validated,
+)
 from _chroma_palace_helper import make_minimal_chroma_sqlite
 
 from mempalace.backends import (
@@ -493,6 +498,20 @@ def test_qdrant_update_skips_missing_ids_conformance(tmp_path, fake_qdrant):
     ref = PalaceRef(id=str(tmp_path), local_path=str(tmp_path))
     col = backend.get_collection(palace=ref, collection_name="drawers", create=True)
     assert_update_skips_missing_ids(backend, col, embedding=[1.0, 0.0])
+
+
+def test_qdrant_where_filters_conformance(tmp_path, fake_qdrant):
+    backend = QdrantBackend()
+    ref = PalaceRef(id=str(tmp_path), local_path=str(tmp_path))
+    col = backend.get_collection(palace=ref, collection_name="drawers", create=True)
+    assert_where_filters_conform(backend, col, embedding=[1.0, 0.0])
+
+
+def test_qdrant_write_batch_validated_conformance(tmp_path, fake_qdrant):
+    backend = QdrantBackend()
+    ref = PalaceRef(id=str(tmp_path), local_path=str(tmp_path))
+    col = backend.get_collection(palace=ref, collection_name="drawers", create=True)
+    assert_write_batch_validated(backend, col, embedding=[1.0, 0.0], add_refuses_duplicates=True)
 
 
 def test_qdrant_namespace_isolation_conformance(tmp_path, fake_qdrant):

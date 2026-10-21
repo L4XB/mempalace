@@ -80,6 +80,7 @@ def cmd_serve(args):
     environment, never argv, so it can't leak through ``ps``, and is never
     printed: a token in a terminal or a service log is a leaked token.
     """
+    from .._env import env_str
     from ..server_registry import load_or_create_server_token, server_token_path
 
     host = args.host
@@ -106,7 +107,7 @@ def cmd_serve(args):
     # A loopback bind no proxy publishes (no MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS)
     # needs no token unless one is given; --no-token is a no-op there. A
     # reachable hub goes tokenless only through --allow-insecure.
-    local_only = loopback and not os.environ.get("MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS", "").strip()
+    local_only = loopback and not env_str("MEMPALACE_MCP_EXTRA_ALLOWED_HOSTS")
     no_token = bool(getattr(args, "no_token", False))
     if no_token and not local_only:
         print(
@@ -117,7 +118,7 @@ def cmd_serve(args):
         sys.exit(2)
 
     # Token resolution. Explicit flag > existing env > the palace's stored token.
-    token = (args.token or os.environ.get("MEMPALACE_MCP_HTTP_TOKEN", "")).strip()
+    token = (args.token or env_str("MEMPALACE_MCP_HTTP_TOKEN", "")).strip()
     token_created = False
     tokenless = local_only or args.allow_insecure
     if not token and not tokenless:
@@ -228,8 +229,11 @@ def cmd_compress(args):
     if col is None:
         sys.exit(1)
 
+    from ..search_util import build_where_filter
+
+    # A wing reads every spelling its project was filed under.
+    where = build_where_filter(args.wing, col=col) or None
     # Query drawers in batches to avoid SQLite variable limit (~999)
-    where = {"wing": args.wing} if args.wing else None
     _BATCH = 500
     docs, metas, ids = [], [], []
     offset = 0

@@ -15,7 +15,7 @@ from chromadb.segment.impl.metadata.sqlite import SqliteMetadataSegment
 from chromadb.types import Operation
 from test_chroma_metadata_contracts import synthetic_db
 
-from mempalace.backends import chroma as cb
+from mempalace.backends import chroma as cb, chroma_sqlite
 from mempalace.backends._inproc_sqlite import release
 
 
@@ -50,7 +50,7 @@ def test_listing_hydrates_only_selected_logical_page(monkeypatch, config, palace
             assert kwargs["_connection"].in_transaction
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(cb, "sqlite_documents_for_ids", documents)
+        monkeypatch.setattr(chroma_sqlite, "sqlite_documents_for_ids", documents)
         page = mcp.tool_list_drawers(wing="alpha", limit=1)
         assert page["total"] == 2
         assert page["drawers"][0]["content_preview"] == "first second"
@@ -81,7 +81,7 @@ def test_preview_failure_retries_listing_through_collection(monkeypatch, config,
         _patch_mcp_server(monkeypatch, config, kg)
         monkeypatch.setattr(mcp, "_is_chroma_backend", lambda: True)
         monkeypatch.setattr(mcp, "_get_collection", lambda *a, **kw: col)
-        monkeypatch.setattr(cb, "sqlite_documents_for_ids", lambda *a, **kw: None)
+        monkeypatch.setattr(chroma_sqlite, "sqlite_documents_for_ids", lambda *a, **kw: None)
         page = mcp.tool_list_drawers()
         assert page["drawers"][0]["content_preview"] == "complete preview"
     finally:
@@ -188,7 +188,7 @@ def test_public_listing_does_not_mix_old_metadata_and_new_preview(
             writer.join(timeout=0.5)
             return result
 
-        monkeypatch.setattr(cb, "sqlite_list_id_metadata", interleaved)
+        monkeypatch.setattr(chroma_sqlite, "sqlite_list_id_metadata", interleaved)
         page = mcp.tool_list_drawers()
         writer.join(timeout=120)
         assert not writer.is_alive(), "concurrent writer never finished"

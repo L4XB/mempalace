@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 from test_sqlite_diary_rows import _NAME, _array_schema, _database, _row
 
-from mempalace.backends import chroma
+from mempalace.backends import chroma_sqlite as chroma
 
 
 def _read(tmp_path, drawer_id, collection_name=_NAME):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
 import threading
@@ -11,7 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from . import paths
 from .fsio import atomic_publish, read_published_bytes
+from .timeutil import utc_now
 from .version import __version__
 
 _POLICY_FILE = "updates.json"
@@ -35,7 +36,7 @@ def _installer_action(installer: str) -> dict:
 
 
 def _config_dir(value=None) -> Path:
-    return Path(value) if value is not None else Path(os.path.expanduser("~/.mempalace"))
+    return Path(value) if value is not None else paths.state_home()
 
 
 def _read_json(name: str, config_dir=None) -> dict:
@@ -141,7 +142,7 @@ def check_updates(
     if not enabled and not force:
         return {"enabled": False, "installed": installed_version, "checked": False}
 
-    now = now or datetime.now(timezone.utc)
+    now = now or utc_now()
     attempted_at = cache.get("attempted_at") or cache.get("checked_at")
     if not force and attempted_at:
         try:

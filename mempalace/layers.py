@@ -25,6 +25,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+from . import paths
 from .config import MempalaceConfig
 from .metadata_types import is_bookkeeping
 from .search_util import (
@@ -33,6 +34,7 @@ from .search_util import (
     _metric_for_collection,
     build_where_filter,
 )
+from .timeutil import recency_key
 
 
 def _get_collection(*args, **kwargs):
@@ -181,7 +183,7 @@ def fetch_recent_window(
     palace_missing = _palace_missing()
     no_retry = missing + (palace_missing,)
     deadline = None if budget is None else time.monotonic() + budget
-    where = {"wing": wing} if wing else None
+    where = build_where_filter(wing, col=col) or None
     try:
         getter = getattr(col, "get_recent", None)
         if getter is not None:
@@ -302,7 +304,7 @@ class Layer0:
 
     def __init__(self, identity_path: str = None):
         if identity_path is None:
-            identity_path = os.path.expanduser("~/.mempalace/identity.txt")
+            identity_path = paths.state_str("identity.txt")
         self.path = identity_path
         self._text = None
 
@@ -401,11 +403,9 @@ class Layer1:
                     except (ValueError, TypeError):
                         pass
                     break
-            # filed_at is an ISO-8601 string; ISO strings sort lexicographically
-            # in chronological order. Coerce to str so a missing/odd value sorts
-            # oldest rather than raising during the comparison.
-            recency = str(meta.get("filed_at") or "")
-            scored.append((importance, recency, meta, doc))
+            # By instant: naive local and UTC filed_at do not sort as text.
+            # A missing or odd value sorts oldest.
+            scored.append((importance, recency_key(meta.get("filed_at")), meta, doc))
 
         # Sort by importance desc, then recency (filed_at) desc; take top N.
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
@@ -471,7 +471,7 @@ class Layer2:
         except Exception as exc:
             return _read_open_failure(exc)
 
-        where = build_where_filter(wing, room)
+        where = build_where_filter(wing, room, col=col)
 
         kwargs = {"include": ["documents", "metadatas"]}
         if where:
@@ -530,7 +530,7 @@ class Layer3:
         except Exception as exc:
             return _read_open_failure(exc)
 
-        where = build_where_filter(wing, room)
+        where = build_where_filter(wing, room, col=col)
 
         kwargs = {"query_texts": [query], "include": ["documents", "metadatas", "distances"]}
         if where:
@@ -580,7 +580,7 @@ class Layer3:
             print(_read_open_failure(exc), file=sys.stderr)
             return []
 
-        where = build_where_filter(wing, room)
+        where = build_where_filter(wing, room, col=col)
 
         kwargs = {"query_texts": [query], "include": ["documents", "metadatas", "distances"]}
         if where:
@@ -632,7 +632,7 @@ class MemoryStack:
     def __init__(self, palace_path: str = None, identity_path: str = None):
         cfg = MempalaceConfig()
         self.palace_path = palace_path or cfg.palace_path
-        self.identity_path = identity_path or os.path.expanduser("~/.mempalace/identity.txt")
+        self.identity_path = identity_path or paths.state_str("identity.txt")
 
         self.l0 = Layer0(self.identity_path)
         self.l1 = Layer1(self.palace_path)

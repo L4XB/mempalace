@@ -42,54 +42,19 @@ def _drop_broken_stdout() -> None:
 # verbatim, adding the local bearer token. This makes stdio-only harnesses
 # (plugins, desktop apps) share the hub with zero client-side reconfiguration.
 # Shares the CLI forwarder's kill switch (MEMPALACE_HUB_FORWARD=0).
-_HUB_FORWARD_ENV = "MEMPALACE_HUB_FORWARD"
-_HUB_PROXY_TIMEOUT_S = 600.0
 _hub_proxy_announced = False
 
 
 def _hub_proxy_target():
-    """Return (base_url, headers) for a live hub serving our palace, or None."""
+    """The live hub serving our palace, or None."""
     global _hub_proxy_announced
-    if _truthy_env_off(_HUB_FORWARD_ENV):
-        return None
-    try:
-        from .. import server_registry
-        from ..hub_client import hub_request_headers
+    from ..hub_client import HubClient
 
-        info = server_registry.read_live_serverinfo(_config.palace_path)
-        if not info or info.get("pid") == os.getpid():
-            return None
-        base_url = server_registry.client_base_url(info)
-        headers = hub_request_headers()
-    except Exception:
-        logger.debug("hub discovery failed; serving locally", exc_info=True)
-        return None
-    if not _hub_proxy_announced:
+    hub = HubClient.discover(_config.palace_path)
+    if hub is not None and not _hub_proxy_announced:
         _hub_proxy_announced = True
-        logger.info("Live palace hub detected at %s; proxying stdio requests to it", base_url)
-    return base_url, headers
-
-
-def _truthy_env_off(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"0", "false", "no", "off"}
-
-
-def _forward_request_to_hub(base_url: str, headers: dict, request: dict, palace_path: str):
-    """POST one JSON-RPC request to the hub; None for notifications (202)."""
-    from .. import server_registry
-
-    body = dumps_internal(request).encode("utf-8")
-    with server_registry.urlopen_with_server_tokens(
-        palace_path,
-        f"{base_url}/mcp",
-        data=body,
-        headers=headers,
-        timeout=_HUB_PROXY_TIMEOUT_S,
-    ) as resp:
-        raw = resp.read()
-    if not raw:
-        return None
-    return json.loads(raw.decode("utf-8"))
+        logger.info("Live palace hub detected at %s; proxying stdio requests to it", hub.base_url)
+    return hub
 
 
 def _request_is_mutating(request: dict) -> bool:
@@ -116,49 +81,25 @@ def _dispatch_stdio_request(request: dict):
     mutating call that failed mid-flight must NOT be replayed locally (the
     hub may still be executing it), so it surfaces as a JSON-RPC error.
     """
-    import http.client
     import urllib.error
 
-    target = _hub_proxy_target()
-    if target is None:
+    from ..hub_client import FORWARD_ERRORS, proxy_error_response
+
+    hub = _hub_proxy_target()
+    if hub is None:
         return handle_request(request)
-    base_url, headers = target
     try:
         from ..mcp_proxy import _annotate_forwarded_update_status
 
-        return _annotate_forwarded_update_status(
-            request,
-            _forward_request_to_hub(base_url, headers, request, _config.palace_path),
-        )
-    except (
-        urllib.error.URLError,
-        OSError,
-        TimeoutError,
-        ValueError,
-        http.client.HTTPException,
-    ) as exc:
+        return _annotate_forwarded_update_status(request, hub.post(request))
+    except FORWARD_ERRORS as exc:
         reached_hub = isinstance(exc, urllib.error.HTTPError)
         if not reached_hub and not _request_is_mutating(request):
-            logger.warning("Hub at %s unreachable (%s); handling request locally", base_url, exc)
+            logger.warning(
+                "Hub at %s unreachable (%s); handling request locally", hub.base_url, exc
+            )
             return handle_request(request)
-        if request.get("id") is None:
-            return None
-        return {
-            "jsonrpc": "2.0",
-            "id": request.get("id"),
-            "error": {
-                "code": -32000,
-                "message": f"palace hub proxy failed: {exc}",
-                "data": {
-                    "hub": base_url,
-                    "hint": (
-                        "The palace hub did not complete this request. Mutating tools "
-                        "are not replayed locally — the hub may still be executing the "
-                        "call. Check the hub process, then retry."
-                    ),
-                },
-            },
-        }
+        return proxy_error_response(request, hub.base_url, exc)
 
 
 def _stdio_reply(line: str, dispatch) -> Optional[str]:
@@ -284,24 +225,8 @@ def _writer_wait_seconds() -> float:
     behaviour of refusing immediately. A value that is not a finite,
     non-negative number falls back to the default with a warning.
     """
-    import math
-
-    raw = os.environ.get(_MCP_WRITER_WAIT_SECONDS_ENV, "").strip()
-    if not raw:
-        return _MCP_WRITER_WAIT_SECONDS_DEFAULT
-    try:
-        seconds = float(raw)
-    except ValueError:
-        seconds = -1.0
-    if not math.isfinite(seconds) or seconds < 0:
-        logger.warning(
-            "Invalid %s=%r; using default %.0f s",
-            _MCP_WRITER_WAIT_SECONDS_ENV,
-            raw,
-            _MCP_WRITER_WAIT_SECONDS_DEFAULT,
-        )
-        return _MCP_WRITER_WAIT_SECONDS_DEFAULT
-    return seconds
+    seconds = env_float(_MCP_WRITER_WAIT_SECONDS_ENV, _MCP_WRITER_WAIT_SECONDS_DEFAULT)
+    return seconds if seconds >= 0 else _MCP_WRITER_WAIT_SECONDS_DEFAULT
 
 
 def _acquire_writer_lease_for_http_startup() -> tuple[bool, str]:
@@ -381,8 +306,7 @@ def _run_http_loop() -> None:
         _start_idle_exit_watchdog()
         _start_write_stall_watchdog()
 
-        raw_warmup = os.environ.get("MEMPALACE_EAGER_WARMUP", "").strip().lower()
-        if raw_warmup in _WARMUP_TRUTHY:
+        if env_bool("MEMPALACE_EAGER_WARMUP", False):
 
             def _warmup_with_lock():
                 with _HTTP_REQUEST_LOCK:
@@ -393,9 +317,6 @@ def _run_http_loop() -> None:
                 name="mcp-http-eager-warmup",
                 daemon=True,
             ).start()
-        elif raw_warmup and raw_warmup not in _WARMUP_FALSY:
-            # Keep the same warning behavior as stdio mode for typo values.
-            _maybe_eager_warmup_embedder()
 
         _serve_http(_args.host, _args.port)
     finally:

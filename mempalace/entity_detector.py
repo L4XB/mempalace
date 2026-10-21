@@ -42,6 +42,8 @@ from pathlib import Path
 from mempalace.i18n import get_entity_patterns
 from mempalace.project_config import MEMPALACE_PROJECT_FILES
 
+from . import paths
+
 # ==================== COCA CONTENT-WORD FILTER ====================
 #
 # Common English content words that frequently appear capitalized (sentence
@@ -250,7 +252,7 @@ SKIP_DIRS = {
     "build",
     ".next",
     "coverage",
-    ".mempalace",
+    paths.DIRNAME,
     ".terraform",
     "vendor",
     "target",

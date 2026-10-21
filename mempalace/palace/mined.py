@@ -112,7 +112,7 @@ def _scan_collection_metadata(collection, keys, absorb, reset) -> None:
     discarded through ``reset`` and the collection is paged instead. If paging
     fails too, :class:`MinedSetUnavailable` stops the caller.
     """
-    from ..backends.chroma import MetadataRecoveryPending
+    from ..backends.chroma_sqlite import MetadataRecoveryPending
 
     fast = _fast_collection_metadata(collection, keys)
     if fast is not None:
@@ -406,7 +406,7 @@ def prefetch_complete_mtimes(collection, source_files) -> Optional[dict[str, tup
     # whether some drawer has no chunk_total].
     groups: dict[str, dict] = {}
     unprovable: set = set()
-    from ..backends.chroma import MetadataRecoveryPending
+    from ..backends.chroma_sqlite import MetadataRecoveryPending
 
     try:
         for meta in rows:

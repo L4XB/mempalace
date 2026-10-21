@@ -3,20 +3,13 @@ MemPalace configuration system.
 
 Priority: env vars > config file > defaults.
 
-The default config directory follows the XDG Base Directory Specification
-(https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html)
-with back-compat for existing installs:
-
-  1. $MEMPALACE_CONFIG_DIR if set (explicit override, used by tests and CI)
-  2. ~/.mempalace if it already exists (existing installs keep working)
-  3. $XDG_CONFIG_HOME/mempalace if XDG_CONFIG_HOME is set
-  4. ~/.config/mempalace (XDG default fallback)
+The default config directory is resolved by ``paths.config_dir`` (XDG with
+back-compat for existing ``~/.mempalace`` installs).
 """
 
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import sys
@@ -24,7 +17,9 @@ from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
-from . import fsio
+from . import fsio, paths
+from ._env import env_flag, env_float, env_int, env_str, parse_bool, parse_number
+from ._once import first_time
 from .write_routing import (
     ResolvedWriteRoutingPolicy,
     RoutingPolicyCandidate,
@@ -54,18 +49,76 @@ def strip_lone_surrogates(text: str) -> str:
 
 
 def normalize_wing_name(name: str) -> str:
-    """Lower-case + collapse separators (`-`, ` `) to `_` for wing slugs.
+    """The one wing slug for a project, directory, or agent name.
 
-    The same rule is applied by ``init`` when persisting `topics_by_wing`
-    and when writing `mempalace.yaml`, so the miner's lookup matches at
-    mine time regardless of the source dirname.
-
-    Leading/trailing separators are stripped so a path-encoded dirname like
-    ``-home-user-proj`` yields ``home_user_proj`` rather than a leading-
-    underscore slug that ``sanitize_name`` (and thus the MCP write tools)
-    would reject.
+    Every producer (``init``, the miners, the hooks of every harness, the
+    diary) slugs through here, so a project lands in one wing whichever
+    tool filed it. Lower-cases, turns spaces and hyphens into ``_``, maps
+    any other character ``sanitize_name`` would reject to ``_`` (keeping
+    ``.`` and ``'``), collapses ``..``, and trims edge separators so a
+    path-encoded dirname like ``-home-user-proj`` yields ``home_user_proj``.
+    The length cap keeps ``wing_<slug>`` within ``sanitize_name``'s limit.
+    Returns ``""`` when nothing is left; callers pick their own fallback.
     """
-    return name.lower().replace(" ", "_").replace("-", "_").strip("_")
+    slug = name.lower().replace(" ", "_").replace("-", "_")
+    slug = re.sub(r"[^\w.']+", "_", slug)
+    slug = re.sub(r"\.{2,}", ".", slug)
+    return slug[:120].strip("_.'")
+
+
+# Where a session started in the home directory files (see hooks_cli).
+WORKSTATION_WINGS = frozenset({"mac_workstation", "windows_workstation", "linux_workstation"})
+
+
+def _cursor_wing_slug(name: str) -> str:
+    """The slug the Cursor hooks used before 3.10: every byte outside
+    ``[a-z0-9_-]`` became ``_``, runs squeezed, edges trimmed."""
+    raw = name.encode("utf-8")
+    slug = re.sub(rb"[^a-z0-9_-]", b"_", raw.lower()).decode("ascii")
+    return re.sub(r"_+", "_", slug).strip("_")
+
+
+def wing_aliases(wing: str, known=()) -> list:
+    """Wing names under which drawers for ``wing``'s project may be stored.
+
+    Earlier releases slugged projects differently per tool: the Claude Code
+    and Antigravity hooks filed diaries (and Antigravity transcripts) under
+    ``wing_<slug>``, the Cursor hooks kept hyphens and turned every other
+    byte outside ``[a-z0-9_-]`` into ``_``, ingest kept characters such as
+    ``+``, and a session in the home directory filed its diary under
+    ``wing_<user>``. Existing drawers are never re-keyed, so a wing filter
+    matches every one of those spellings: the name as given, its current
+    slug with and without the ``wing_`` prefix, the slug with hyphens, the
+    Cursor rule applied to both, and the old home diary wing for a
+    workstation wing. ``known`` (the palace's wing names) adds every stored
+    wing whose name slugs to the same thing. The name as given comes first.
+    """
+    bare = wing[len("wing_") :] if wing.startswith("wing_") else wing
+    slug = normalize_wing_name(bare)
+    hyphens = slug.replace("_", "-")
+    variants = [slug, hyphens]
+    # Only when every word keeps a character: `日本_api` was never `api`.
+    if all(_cursor_wing_slug(word) for word in re.split(r"[_-]", slug) if word):
+        variants += [_cursor_wing_slug(slug), _cursor_wing_slug(hyphens)]
+    names = [wing]
+    for variant in variants:
+        if not variant:
+            continue
+        for name in (variant, f"wing_{variant}"):
+            if name not in names:
+                names.append(name)
+    if slug in WORKSTATION_WINGS:
+        home = normalize_wing_name(Path.home().name)
+        if home and f"wing_{home}" not in names:
+            names.append(f"wing_{home}")
+    if slug:
+        for name in sorted(known):
+            if name in names or not isinstance(name, str):
+                continue
+            stored = name[len("wing_") :] if name.startswith("wing_") else name
+            if normalize_wing_name(stored) == slug:
+                names.append(name)
+    return names
 
 
 def sanitize_name(value: str, field_name: str = "name") -> str:
@@ -205,52 +258,13 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
     return strip_lone_surrogates(value)
 
 
-# ── XDG Base Directory resolution ─────────────────────────────────────────────
-
-# Files that mark a ~/.mempalace directory as a real legacy install rather
-# than an empty/leftover directory. Any one is enough for back-compat.
-_LEGACY_MARKERS = ("config.json", "people_map.json")
-
-
-def _has_legacy_install(legacy: Path) -> bool:
-    """Return True if ``legacy`` is a real legacy install, not an empty dir.
-
-    A bare ``palace`` directory created by some other tool should not hijack
-    the XDG path, so the palace sub-directory only counts when it contains
-    an actual ChromaDB store (``chroma.sqlite3``).
-    """
-    if any((legacy / marker).is_file() for marker in _LEGACY_MARKERS):
-        return True
-    return (legacy / "palace" / "chroma.sqlite3").is_file()
-
-
-def _default_config_dir() -> Path:
-    """Return the default config directory.
-
-    See the module docstring for the resolution order.
-    """
-    env_dir = os.environ.get("MEMPALACE_CONFIG_DIR")
-    if env_dir and env_dir.strip():
-        return Path(env_dir).expanduser()
-
-    legacy = Path.home() / ".mempalace"
-    if legacy.is_dir() and _has_legacy_install(legacy):
-        return legacy
-
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg and xdg.strip():
-        xdg_path = Path(xdg).expanduser()
-        # Per XDG spec, relative paths must be ignored as invalid.
-        if xdg_path.is_absolute():
-            return xdg_path / "mempalace"
-
-    return Path.home() / ".config" / "mempalace"
-
+# The config directory lives in paths.py; this name is kept for importers.
+_default_config_dir = paths.config_dir
 
 # DEPRECATED: kept only for backward compatibility with external importers.
 # This constant is frozen at the legacy location and is NOT XDG-aware — prefer
 # MempalaceConfig().palace_path in new code.
-DEFAULT_PALACE_PATH = os.path.expanduser("~/.mempalace/palace")
+DEFAULT_PALACE_PATH = paths.default_palace_path()
 DEFAULT_COLLECTION_NAME = "mempalace_drawers"
 DEFAULT_BACKEND = "chroma"
 DEFAULT_EMBEDDINGGEMMA2_REVISION = "914f7f89142e33e77833254d9c9b90c3cef7303b"
@@ -259,7 +273,6 @@ _EMBEDDINGGEMMA2_DIMENSIONS = frozenset({768, 512, 256, 128})
 # Upper bound for embeddinggemma2_batch_size: larger values are almost
 # certainly a typo and would allocate far beyond any GPU's memory.
 _EMBEDDINGGEMMA2_MAX_BATCH_SIZE = 1024
-_BATCH_SIZE_WARNED: set = set()
 _EMBEDDINGGEMMA2_MODALITIES = frozenset({"text", "text+vision", "text+audio", "all"})
 DEFAULT_MILVUS_CONSISTENCY_LEVEL = "Strong"
 _MILVUS_CONSISTENCY_LEVELS = {
@@ -469,18 +482,14 @@ def _json_type_name(value) -> str:
     return type(value).__name__
 
 
-# (path, problem) pairs already reported by this process. MempalaceConfig is
-# built many times per process (CLI, MCP, hooks, search), and one unusable
-# file should be one line on stderr, not one per construction.
-_WARNED_UNUSABLE_CONFIGS: set = set()
-
-
 def _warn_unusable_config_once(config_file: Path, problem: str) -> None:
-    """Say on stderr that ``config_file`` is being ignored, once per process."""
-    key = (str(config_file), problem)
-    if key in _WARNED_UNUSABLE_CONFIGS:
+    """Say on stderr that ``config_file`` is being ignored, once per process.
+
+    MempalaceConfig is built many times per process (CLI, MCP, hooks, search),
+    and one unusable file should be one line on stderr, not one per construction.
+    """
+    if not first_time("config", "unusable", str(config_file), problem):
         return
-    _WARNED_UNUSABLE_CONFIGS.add(key)
     print(
         f"  ! {config_file} {problem}; ignoring it and using default settings. "
         "Fix or remove it; the next settings write keeps it aside and starts a new one.",
@@ -796,13 +805,10 @@ class MempalaceConfig:
     @property
     def qdrant_timeout(self):
         """Qdrant HTTP timeout in seconds."""
-        env_val = os.environ.get("MEMPALACE_QDRANT_TIMEOUT")
-        raw = env_val if env_val is not None else self._file_config.get("qdrant_timeout", 10.0)
-        try:
-            timeout = float(raw)
-        except (TypeError, ValueError):
-            timeout = 10.0
-        return timeout if timeout > 0 else 10.0
+        timeout = env_float("MEMPALACE_QDRANT_TIMEOUT")
+        if timeout is None:
+            timeout = parse_number(self._file_config.get("qdrant_timeout", 10.0))
+        return timeout if timeout is not None and timeout > 0 else 10.0
 
     @property
     def milvus_uri(self):
@@ -916,9 +922,9 @@ class MempalaceConfig:
         When False, hooks pass through without blocking — equivalent to
         disabling auto-save while keeping hook scripts installed.
         """
-        env_val = os.environ.get("MEMPALACE_HOOKS_AUTO_SAVE")
-        if env_val is not None:
-            return env_val.lower() not in ("false", "0", "no")
+        flag = env_flag("MEMPALACE_HOOKS_AUTO_SAVE")
+        if flag is not None:
+            return flag
         hooks = self._file_config.get("hooks", {})
         return hooks.get("auto_save", True)
 
@@ -930,14 +936,12 @@ class MempalaceConfig:
         Every drawer from a file whose text the speller changed carries
         ``transforms: "spellcheck_user"``.
         """
-        env_val = os.environ.get("MEMPALACE_CONVO_SPELLCHECK")
-        if env_val is not None:
-            return env_val.lower() in ("true", "1", "yes", "on")
+        flag = env_flag("MEMPALACE_CONVO_SPELLCHECK")
+        if flag is not None:
+            return flag
         convo = self._file_config.get("convo")
         value = convo.get("spellcheck", False) if isinstance(convo, dict) else False
-        if isinstance(value, str):
-            return value.lower() in ("true", "1", "yes", "on")
-        return value is True
+        return parse_bool(value) is True
 
     @property
     def hall_keywords(self):
@@ -1233,9 +1237,7 @@ class MempalaceConfig:
                 val = None
         if val is not None and 1 <= val <= _EMBEDDINGGEMMA2_MAX_BATCH_SIZE:
             return val
-        key = (source, repr(raw))
-        if key not in _BATCH_SIZE_WARNED:
-            _BATCH_SIZE_WARNED.add(key)
+        if first_time("config", "batch-size", source, repr(raw)):
             logger.warning(
                 "%s=%r is not an integer from 1 to %d; EmbeddingGemma 2 uses the "
                 "per-device default batch size (32 on CUDA, 4 on CPU/MPS).",
@@ -1378,9 +1380,9 @@ class MempalaceConfig:
         ``embedding_model`` the result is not lower-cased — URLs, model ids,
         and API keys are case-sensitive.
         """
-        env_val = os.environ.get(env_var)
-        if env_val and env_val.strip():
-            return env_val.strip()
+        env_val = env_str(env_var)
+        if env_val:
+            return env_val
         cfg_val = self._file_config.get(config_key)
         if isinstance(cfg_val, str) and cfg_val.strip():
             return cfg_val.strip()
@@ -1396,18 +1398,10 @@ class MempalaceConfig:
         in ``config.json`` shouldn't take retrieval down (mirrors
         ``embedding_threads`` / ``embeddinggemma_batch_size``).
         """
-        raw = os.environ.get(env_var)
-        if raw is None or not str(raw).strip():
-            raw = self._file_config.get(config_key)
-        if raw is None:
-            return default
-        try:
-            val = float(str(raw).strip())
-        except (TypeError, ValueError):
-            return default
-        if not math.isfinite(val) or val < 0:
-            return default
-        return val
+        val = env_float(env_var)
+        if val is None:
+            val = parse_number(self._file_config.get(config_key))
+        return default if val is None or val < 0 else val
 
     @property
     def embedding_api_url(self):
@@ -1450,14 +1444,9 @@ class MempalaceConfig:
         link. Reads ``MEMPALACE_TOPIC_TUNNEL_MIN_COUNT`` env first, then the
         config-file value, then ``1``.
         """
-        env_val = os.environ.get("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT")
-        if env_val:
-            try:
-                parsed = int(env_val)
-                if parsed >= 1:
-                    return parsed
-            except ValueError:
-                pass
+        parsed = env_int("MEMPALACE_TOPIC_TUNNEL_MIN_COUNT")
+        if parsed is not None and parsed >= 1:
+            return parsed
         cfg_val = self._file_config.get("topic_tunnel_min_count")
         try:
             parsed = int(cfg_val) if cfg_val is not None else 1
@@ -1480,14 +1469,9 @@ class MempalaceConfig:
         Reads ``MEMPALACE_KG_HALLWAY_MIN_COUNT`` env first, then the
         ``hallway_min_count`` config-file value, then ``2``. Clamped to ``>=1``.
         """
-        env_val = os.environ.get("MEMPALACE_KG_HALLWAY_MIN_COUNT")
-        if env_val:
-            try:
-                parsed = int(env_val)
-                if parsed >= 1:
-                    return parsed
-            except ValueError:
-                pass
+        parsed = env_int("MEMPALACE_KG_HALLWAY_MIN_COUNT")
+        if parsed is not None and parsed >= 1:
+            return parsed
         cfg_val = self._file_config.get("hallway_min_count")
         try:
             parsed = int(cfg_val) if cfg_val is not None else 2
@@ -1515,11 +1499,9 @@ class MempalaceConfig:
         manages cleanup). Negative or non-numeric values fall back to the
         default rather than crashing migrate/repair.
         """
-        env_val = os.environ.get("MEMPALACE_MAX_BACKUPS")
-        if env_val is not None:
-            coerced = self._try_coerce_int(env_val, minimum=0)
-            if coerced is not None:
-                return coerced
+        coerced = env_int("MEMPALACE_MAX_BACKUPS")
+        if coerced is not None and coerced >= 0:
+            return coerced
         coerced = self._try_coerce_int(
             self._file_config.get("max_backups", DEFAULT_MAX_BACKUPS), minimum=0
         )
@@ -1665,14 +1647,12 @@ class MempalaceConfig:
     @property
     def hook_use_daemon(self):
         """Whether hooks should submit save/mine work to the opt-in daemon."""
-        env_val = os.environ.get("MEMPALACE_HOOKS_DAEMON")
-        if env_val is not None:
-            return env_val.lower() in ("true", "1", "yes", "on")
+        flag = env_flag("MEMPALACE_HOOKS_DAEMON")
+        if flag is not None:
+            return flag
         value = self._file_config.get("hooks", {}).get("daemon", False)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.lower() in ("true", "1", "yes", "on")
+        if isinstance(value, (bool, str)):
+            return parse_bool(value) is True
         return value == 1
 
     def set_hook_setting(self, key: str, value: bool):

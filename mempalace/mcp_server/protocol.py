@@ -555,7 +555,7 @@ def _stale_library_payload() -> dict:
             )
     if inactive:
         payload["unreadable"] = inactive
-    if drift and _truthy_env(_MCP_ALLOW_STALE_LIBRARY_ENV):
+    if drift and env_bool(_MCP_ALLOW_STALE_LIBRARY_ENV, False):
         payload["gate_disabled_by"] = _MCP_ALLOW_STALE_LIBRARY_ENV
     return payload
 
@@ -575,7 +575,7 @@ def _mcp_stale_library_refusal(req_id, tool_name: str):
     if tool_name not in _MUTATING_TOOLS:
         return None
 
-    if _truthy_env(_MCP_ALLOW_STALE_LIBRARY_ENV):
+    if env_bool(_MCP_ALLOW_STALE_LIBRARY_ENV, False):
         return None
 
     drift, _unreadable = _stale_library_report()
@@ -1084,8 +1084,6 @@ def _restore_stdout():
     sys.stdout = _REAL_STDOUT
 
 
-_WARMUP_TRUTHY = {"1", "true", "yes", "on"}
-_WARMUP_FALSY = {"", "0", "false", "no", "off"}
 # Sentinel text for the warmup query. Distinctive so it cannot semantically
 # match real drawer content (e.g. a palace containing notes about "warmup"
 # routines) and is greppable in chromadb debug logs if the team ever adds
@@ -1170,16 +1168,9 @@ def _maybe_eager_warmup_embedder() -> None:
     has zero cold-load cost; nothing was skipped that the first real tool
     call would have paid.
     """
-    raw = os.environ.get("MEMPALACE_EAGER_WARMUP", "").strip().lower()
-    if raw in _WARMUP_FALSY:
+    if not env_bool("MEMPALACE_EAGER_WARMUP", False):
         return
-    if raw not in _WARMUP_TRUTHY:
-        logger.warning(
-            "MEMPALACE_EAGER_WARMUP=%r is not recognized (use one of %s); warmup disabled",
-            raw,
-            sorted(_WARMUP_TRUTHY | (_WARMUP_FALSY - {""})),
-        )
-        return
+    raw = env_str("MEMPALACE_EAGER_WARMUP")
     palace_path = _config.palace_path
     try:
         backend_name = _selected_backend_name()
@@ -1260,14 +1251,7 @@ _write_stall_inflight: Optional[dict] = None
 
 
 def _write_stall_secs(env_name: str, default: float) -> float:
-    raw = os.environ.get(env_name, "")
-    if not raw.strip():
-        return default
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        logger.warning("%s=%r is not a number; using %.0fs", env_name, raw, default)
-        return default
+    return max(0.0, env_float(env_name, default))
 
 
 def _write_stall_action(elapsed: float, warn_secs: float, exit_secs: float, warned: bool):

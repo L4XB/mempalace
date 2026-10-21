@@ -40,11 +40,11 @@ import time
 from collections import defaultdict
 from contextlib import closing, suppress
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Callable, Iterator, Optional
 
 from chromadb.errors import NotFoundError as ChromaNotFoundError
 
+from . import paths
 from .backends._inproc_sqlite import (
     open_reader as open_palace_reader,
     open_writer as open_palace_writer,
@@ -57,7 +57,9 @@ from .backends.chroma import ChromaBackend, _clear_chroma_system_cache, hnsw_cap
 # backends._inproc_sqlite, which opens them with connect_sqlite_read under the
 # palace's in-process lock.
 from .config import connect_sqlite_read, sqlite_read_uri  # noqa: F401
+from .fsio import atomic_write_text
 from .stored_text import decode_record
+from .timeutil import filename_stamp
 
 COLLECTION_NAME = "mempalace_drawers"
 
@@ -106,30 +108,6 @@ def _open_regular_file_no_follow(path: str) -> int:
         raise
 
 
-def _write_text_replace_no_follow(path: str, text: str) -> None:
-    directory = os.path.dirname(path) or "."
-    basename = os.path.basename(path)
-    tmp_path = os.path.join(
-        directory,
-        f".{basename}.{os.getpid()}.{int(time.time() * 1_000_000)}.tmp",
-    )
-    fd = os.open(
-        tmp_path,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _no_follow_flag(),
-        0o600,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
 def _copy_file_no_follow(src: str, dst: str, *, replace: bool = False) -> None:
     src_fd = _open_regular_file_no_follow(src)
     try:
@@ -156,7 +134,7 @@ def _copy_file_no_follow(src: str, dst: str, *, replace: bool = False) -> None:
 
 
 def _unique_backup_path(path: str, label: str) -> str:
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp = filename_stamp("_")
     return f"{path}.{label}.{stamp}.{os.getpid()}"
 
 
@@ -228,7 +206,7 @@ def _get_palace_path():
 
         return MempalaceConfig().palace_path
     except Exception:
-        return os.path.join(os.path.expanduser("~"), ".mempalace", "palace")
+        return str(paths.state_path("palace"))
 
 
 def _paginate_ids(col, where=None):
@@ -729,9 +707,9 @@ def scan_palace(palace_path=None, only_wing=None, collection_name: Optional[str]
     print(f"  BAD:  {len(bad_set):,}  ({len(bad_set) / max(len(all_ids), 1) * 100:.1f}%)")
 
     bad_file = os.path.join(palace_path, "corrupt_ids.txt")
-    _write_text_replace_no_follow(
-        bad_file,
-        "".join(f"{bid}\n" for bid in sorted(bad_set)),
+    # A symlink at that name is replaced, never written through.
+    atomic_write_text(
+        bad_file, "".join(f"{bid}\n" for bid in sorted(bad_set)), follow_symlinks=False
     )
     print(f"\n  Bad IDs written to: {bad_file}")
     return good_set, bad_set
@@ -2276,7 +2254,7 @@ def _preserve_knowledge_graph_sqlite(source_palace: str, dest_palace: str) -> li
     so it must be copied explicitly or the repair succeeds while silently
     dropping KG state.
     """
-    filename = "knowledge_graph.sqlite3"
+    filename = paths.KNOWLEDGE_GRAPH_FILENAME
     src = os.path.join(source_palace, filename)
     dst = os.path.join(dest_palace, filename)
     if os.path.islink(src) or not os.path.isfile(src):
@@ -2658,7 +2636,7 @@ def _rebuild_from_sqlite_locked(
         return {}
 
     if in_place:
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        ts = filename_stamp()
         archive_path = f"{dest_palace}.pre-rebuild-{ts}"
         print(f"  Archiving {dest_palace} -> {archive_path}")
         # os.rename, NOT shutil.move. When any file inside the palace is
@@ -3164,7 +3142,7 @@ def _apply_max_seq_id_plan(
         from .backups import prune_backups
         from .config import MempalaceConfig
 
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        timestamp = filename_stamp()
         backup_path = os.path.join(palace_path, f"chroma.sqlite3.max-seq-id-backup-{timestamp}")
         # Through the backup API, so a writer's uncheckpointed WAL is in it.
         _copy_sqlite_db(db_path, backup_path)

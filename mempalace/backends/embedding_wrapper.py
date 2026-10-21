@@ -6,7 +6,12 @@ import inspect
 from pathlib import PurePath
 from typing import Optional
 
-from .base import BaseCollection, GetResult, initialize_last_modified_metadata
+from .base import (
+    BaseCollection,
+    GetResult,
+    initialize_last_modified_metadata,
+    validate_write_batch,
+)
 
 
 def _supports_metadata_aware_documents(embedder) -> bool:
@@ -199,10 +204,7 @@ class EmbeddingCollection(BaseCollection):
         ids = _as_list(ids)
         if metadatas is not None:
             metadatas = initialize_last_modified_metadata(_as_list(metadatas))
-        if metadatas is not None and len(metadatas) != len(ids):
-            raise ValueError("metadatas length does not match ids length")
-        if len(documents) != len(ids):
-            raise ValueError("documents length does not match ids length")
+        validate_write_batch(ids, documents=documents, metadatas=metadatas)
         expected = None
         if embeddings is None:
             embedder = _resolve_document_embedder()
@@ -348,15 +350,7 @@ class EmbeddingCollection(BaseCollection):
             metadatas = _as_list(metadatas)
         if documents is not None:
             documents = _as_list(documents)
-        for label, value in (
-            ("documents", documents),
-            ("metadatas", metadatas),
-            ("embeddings", embeddings),
-        ):
-            if value is not None and len(value) != len(ids):
-                raise ValueError(
-                    f"{label} length {len(value)} does not match ids length {len(ids)}"
-                )
+        validate_write_batch(ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
         expected = None
         if documents is not None and embeddings is None:
             embedder = _resolve_document_embedder()

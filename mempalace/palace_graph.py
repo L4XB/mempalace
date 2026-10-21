@@ -28,8 +28,8 @@ import threading
 import time
 from collections import Counter, defaultdict
 from contextlib import contextmanager
-from datetime import datetime, timezone
 
+from . import paths
 from .backends.base import BaseCollection, PalaceNotFoundError
 from .config import MempalaceConfig, normalize_wing_name
 from .dynamics import initialize_dynamics_fields, potentiate
@@ -38,8 +38,9 @@ from .fsio import (
     read_json_for_update as _read_json_for_update,
 )
 from .palace import get_collection as _get_palace_collection, mine_lock
+from .timeutil import utc_now_iso
 
-logger = logging.getLogger("mempalace_graph")
+logger = logging.getLogger(__name__)
 
 
 def _normalize_wing(wing: str | None) -> str | None:
@@ -93,7 +94,7 @@ def sqlite_grouped_counts_reader(config=None):
             config.palace_path, explicit=os.environ.get("MEMPALACE_BACKEND_EXPLICIT")
         )
         if backend == "chroma":
-            from .backends.chroma import sqlite_room_wing_hall_counts
+            from .backends.chroma_sqlite import sqlite_room_wing_hall_counts
 
             db_name = "chroma.sqlite3"
         elif backend in {"sqlite_exact", "rust_exact"}:
@@ -516,7 +517,7 @@ def _get_tunnel_file(config=None) -> str:
 
 def _legacy_tunnel_file() -> str:
     """The pre-3.3.6 hardcoded path. Kept only for one-time orphan detection."""
-    return os.path.join(os.path.expanduser("~"), ".mempalace", "tunnels.json")
+    return str(paths.state_path("tunnels.json"))
 
 
 def _load_tunnels(config=None, *, for_write=False):
@@ -727,7 +728,7 @@ def _upsert_tunnel(tunnels: list, existing, tunnel: dict) -> dict:
     if existing is not None:
         # Preserve original creation timestamp on label updates.
         tunnel["created_at"] = existing.get("created_at", tunnel["created_at"])
-        tunnel["updated_at"] = datetime.now(timezone.utc).isoformat()
+        tunnel["updated_at"] = utc_now_iso()
         # Preserve L7 dynamics fields across re-creation events.
         # Without this, a label update (or any re-create) would
         # reset the connection's strength / stability / access_count
@@ -828,7 +829,7 @@ def create_tunnel(
         "target": {"wing": target_wing, "room": target_room},
         "label": label,
         "kind": kind,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": utc_now_iso(),
     }
     if source_drawer_id:
         tunnel["source"]["drawer_id"] = source_drawer_id

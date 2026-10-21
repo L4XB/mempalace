@@ -68,6 +68,7 @@ def _query_drawers_with_filter_fallback(
         raw_docs = _first_or_empty(raw, "documents")
         raw_ids = _aligned_query_ids(raw, len(raw_docs))
         fids, fdocs, fmetas, fdists = [], [], [], []
+        wings = set(palace_wing_aliases(wing, drawers_col)) if wing else None
         for stored_drawer_id, doc, meta, dist in zip(
             raw_ids,
             raw_docs,
@@ -75,7 +76,7 @@ def _query_drawers_with_filter_fallback(
             _first_or_empty(raw, "distances"),
         ):
             meta = meta or {}
-            if wing and meta.get("wing") != wing:
+            if wings and meta.get("wing") not in wings:
                 continue
             if room and meta.get("room") != room:
                 continue
@@ -224,7 +225,7 @@ def search_memories(
         since: Optional inclusive ISO date/datetime lower bound on a
             drawer's ``filed_at`` (ingest time, the ``created_at`` shown in
             results) — ``[since, before)`` window semantics shared with
-            ``list_drawers``: wall-clock naive comparison, drawers
+            ``list_drawers``: compared as instants (see ``date_window``), drawers
             with missing/unparseable ``filed_at`` excluded while a bound is
             active. Filtering happens after retrieval (ChromaDB rejects
             string operands for ``$gte``/``$lt``), so the candidate pool is
@@ -318,7 +319,7 @@ def search_memories(
         return open_error
 
     metric = _metric_for_collection(drawers_col)
-    where = build_where_filter(wing, room, source_file)
+    where = build_where_filter(wing, room, source_file, col=drawers_col)
 
     # Hybrid retrieval: always query drawers directly (the floor), then use
     # closet hits to boost rankings. Closets are a ranking SIGNAL, never a
